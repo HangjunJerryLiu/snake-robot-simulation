@@ -1,12 +1,74 @@
+"""
+Ground-to-pipe climbing simulation, using the adaptive helical rolling method
+of Takemori, Tanaka and Matsuno (IEEE T-RO 39(1):437-451, 2023).
+
+The robot sidewinds across the floor to a vertical pole, wraps it as a normal
+helix, and then climbs by HELICAL ROLLING: the commanded form stays a single
+continuous helix at a fixed pitch angle, and the body rolls around that form
+while the cross-sectional shape is continuously re-measured and re-squeezed to
+whatever the pole is actually doing. The algorithm itself lives in
+helical_rolling.py, which carries the equation-by-equation commentary; this
+file is the ground gait, the hand-off into the helix, and the run loop.
+
+WHAT CHANGED, AND WHY
+---------------------------------------------------------------------------
+The previous version of this file climbed with an open-loop "breathing coil":
+all nine joint pairs were driven in unison through a phase cycle whose coil
+radius grew and shrank, and the climb came from that clamp/release ratchet
+plus the body rolling lumpily against the pole. It worked, but it was not the
+paper's method and it had two real problems -- the shape was a fixed family of
+circles that could not adapt to anything the pole did, and the ratchet leaned
+on parts of the body pressing against each other, so self-collision was doing
+some of the lifting.
+
+The method here has neither property:
+
+  * the target form is a helix at ALL times, never a squeezing circle, so the
+    only thing touching the pole is the wrap itself;
+  * the cross-sectional shape is measured from the joint angles every control
+    tick and deformed to fit whatever it found, so the level of locality is
+    the number of joints (18) rather than 1 -- each joint adapts to the piece
+    of pole in front of it, which is the paper's central claim (its Fig. 2);
+  * compliance acts ONLY perpendicular to the pole. The pitch angle alpha is a
+    fixed design constant and never adapts, so tightening the grip cannot also
+    change the lead of the helix and let the robot slide.
+
+Climbing comes from psi_roll in eq. (33) alone: advancing it rolls the whole
+body around an unchanged target form, and the wrap screws itself up the pole.
+
+MEASURED, not assumed  (climb_from_wrapped.py mechanism, 67 s of climbing)
+---------------------------------------------------------------------------
+  robot-on-pole contacts   11.5 per sample on average, peak 24
+  robot-on-robot contacts   0.5 per sample, and 61% of samples have none
+  body roll about its own   95% of the commanded psi_roll -- it really rolls,
+    axis                    rather than ratcheting
+  orbit around the pole     1.9 revolutions against 16.8 of roll -- it screws
+                            upward while staying put around the pole
+  climb per psi_roll turn   9.65 cm against an ideal screw lead of 11.93 cm,
+                            so 81% of the ideal and 19% slip
+
+Full run, ground to the top: 2.71 m of climb at 2.44 cm/s.
+
+FILES
+---------------------------------------------------------------------------
+  helical_rolling.py     the method, step by step, with equation references
+  snake_backbone.py      link-edge points and link lengths out of the model
+  calibrate_helical.py   solves the sign convention eq. (32) takes here
+  climb_from_wrapped.py  the loop on its own, from a wrapped start
+"""
+
+import sys
 import time
 
 import mujoco
-import mujoco_viewer
 import numpy as np
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Helper
-# ─────────────────────────────────────────────────────────────────────────────
+import helical_rolling as hr
+from snake_backbone import Backbone
+
+HEADLESS = '--headless' in sys.argv
+
+
 def deg2rad(d):
     return d * np.pi / 180
 
@@ -15,26 +77,34 @@ def deg2rad(d):
 # Load model
 # ─────────────────────────────────────────────────────────────────────────────
 model = mujoco.MjModel.from_xml_path('9motor_sidewinder_pipe.xml')
-data  = mujoco.MjData(model)
+data = mujoco.MjData(model)
 
-N = 9   # number of motor (yaw/pitch) pairs along the body
+N = 9      # number of yaw/pitch joint pairs along the body
+NJ = 18    # joints
+
+backbone = Backbone(model)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PIPE GEOMETRY  (must match the XML values)
 # ─────────────────────────────────────────────────────────────────────────────
 PIPE_RADIUS = 0.04    # m  – cylinder radius in XML: size="0.04 1.5"
-PIPE_X      = 0.0     # m  – pipe axis at world origin
-PIPE_Y      = 0.0
+PIPE_X = 0.0          # m  – pipe axis at world origin
+PIPE_Y = 0.0
 
-BODY_NAMES = ['tail']
-for i in range(1, 9):
-    BODY_NAMES += [f'M{i}', f'L{i}']
-BODY_NAMES += ['M9', 'head']
-BODY_IDS = [model.body(n).id for n in BODY_NAMES]
+# Where the pole actually holds the robot, measured over a climb: the coil
+# settles at 7.4 cm of radius and stays there. Nothing in the controller sets
+# that number -- the compliance term only ever asks for "tighter than now",
+# and this is simply where the pole stops it. It is quoted so the run log has
+# something to compare against.
+#
+# It is smaller than the pole radius (4.0 cm) plus the fattest part of the
+# body (4.3 cm, the L links' convex hull, which is what MuJoCo collides), and
+# that is not a contradiction: the coil radius is measured to the JOINT
+# CENTRES, which sit inside the links, while contact happens out at the hull.
+SETTLED_RADIUS = 0.074
 
-# One representative body per yaw/pitch joint pair (n = 1..9). M_n carries the
-# yaw joint of pair n, so it is the leading body of that pair as the snake
-# advances toward the pipe.
+# One representative body per joint pair (n = 1..9), used only to notice when
+# a pair has arrived at the pole during the approach.
 PAIR_BODY_IDS = [model.body(f'M{n}').id for n in range(1, N + 1)]
 
 
@@ -47,10 +117,11 @@ def radial_distance(xy):
 # PHASE 1 GAIT – GROUND APPROACH (flat-ground sidewinding)
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# The same zero-mean traveling-wave serpenoid gait validated in
-# robot_command.py (0.9 m of travel over 9.5 s). No DC bias, so it sidewinds
-# across the floor and does not wrap around anything by itself. Its only job
-# is to carry the snake from its starting spot on the ground to the pipe.
+# Unchanged from before, and unrelated to the paper: the same zero-mean
+# traveling-wave serpenoid gait validated in robot_command.py (0.9 m of travel
+# over 9.5 s). No DC bias, so it sidewinds across the floor and does not wrap
+# around anything by itself. Its only job is to carry the snake from its
+# starting spot on the ground to the pole.
 AY_APPROACH = deg2rad(45)
 AP_APPROACH = deg2rad(30)
 OMEGA_APPROACH = 2.0
@@ -60,8 +131,8 @@ DELTA_D_APPROACH = 0.5 * np.pi
 
 
 def approach_cmd(t):
-    joints = np.zeros(18)
-    for joint_idx in range(18):
+    joints = np.zeros(NJ)
+    for joint_idx in range(NJ):
         joint_num = joint_idx + 1
         if joint_num % 2 == 1:          # yaw
             n = (joint_num + 1) // 2
@@ -77,256 +148,165 @@ def approach_cmd(t):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PHASE 2/3 GAIT – WRAP THE POLE, THEN CLIMB BY CLAMPING AND EXTENDING
+# PHASE 2/3 – ADAPTIVE HELICAL ROLLING  (the paper's method)
 # ─────────────────────────────────────────────────────────────────────────────
 #
-#  WHAT THIS GAIT ACTUALLY DOES  (measured, not assumed)
-#  ───────────────────────────────────────────────────────────────────────
-#  Every joint pair is driven in unison (XI = 0): all yaw joints follow
-#  A_YAW*sin(phase), all pitch joints A_PITCH*sin(phase + DELTA). Because the
-#  two amplitudes differ and the offset is not 90 deg, the body does not hold
-#  one fixed coil -- it cycles through a family of coils whose radius breathes
-#  over one phase cycle.
+# THE FOUR NUMBERS THAT MATTER, and what each one does
+# ───────────────────────────────────────────────────────────────────────────
+# ALPHA       The pitch angle of the target helix -- the angle between the
+#             body and the plane perpendicular to the pole. It is a design
+#             parameter, held constant, and holding it constant is the whole
+#             trick: compliance is then confined to the cross-sectional shape,
+#             i.e. to the direction perpendicular to the pole, so squeezing
+#             harder can never change the lead of the wrap. Bigger alpha means
+#             a steeper wrap, fewer turns around the pole and less of the body
+#             in contact; smaller alpha means more wraps but a flatter screw.
+#             The paper used 0.20-0.30 rad across its four experiments.
 #
-#  Touching the pole at all takes roughly 8.3 cm of coil radius: 4.0 cm of
-#  pole plus about 4.3 cm of body. (That 4.3 cm is the L link's CONVEX HULL,
-#  not its drawn shape -- MuJoCo collides the hull of a mesh, and these
-#  clevis-shaped links have hulls 6.4x their drawn volume. It is why only
-#  about 3 of the 20 bodies actually reach the pole at any moment, and why
-#  the snake can look like it is not touching.) The breathing cycle varies
-#  how hard those few contacts are pressed -- a clamp / extend / re-clamp
-#  squeeze cycle on top of the body roll described next.
+#             Nothing in the loop ever sets the coil RADIUS: the radius is
+#             whatever the pole leaves the robot at, and the compliance term
+#             below only ever asks for "a bit tighter than that". So there is
+#             no radius parameter here at all, which is the point -- it is what
+#             lets the same numbers work on a pole of any size.
 #
-#  DOES IT ROLL?  YES -- measured two ways, which disagree until you are
-#  careful about which rotation you mean:
+# K           Compliance gain, eq. (23). Each tick the controller commands a
+#             cross-section whose radius is (1-K) times the one it just
+#             measured -- "tighten a little more than you currently are". The
+#             pole stops the robot from getting there, and the shortfall is
+#             what becomes grip force through the position servos. K is per
+#             joint, and following the paper it is halved over the last few
+#             joints at each end: those ends are cantilevered off the pole, so
+#             a full-strength squeeze there just curls them into the air.
 #
-#    about its OWN long axis : -0.86 revolutions per gait cycle. The body
-#                              really is rolling, at close to the commanded
-#                              one-revolution-per-cycle.
-#    about the POLE axis     : 0.003-0.012 revolutions per gait cycle, i.e.
-#                              essentially nothing. It does not orbit.
-#
-#  Both are correct and both are expected: a helix rolling against a pole
-#  screws itself upward while staying at the same angular position around
-#  the pole. (An earlier version of this comment claimed the robot "climbs
-#  almost without rotating" -- that was measuring the pole-axis number and
-#  was wrong about the mechanism.)
-#
-#  What this robot does NOT do is roll as a rigid helix. Fitting a rigid
-#  screw to the phase advance leaves a 5-16 mm residual for every shape in
-#  this family, because 9 joint pairs at 8 cm spacing holding >=1.2 wraps
-#  gives at most ~7 pairs per turn -- a 7-sided polygon, which clunks rather
-#  than rolls. So the body rolls, but lumpily, and the climb comes from the
-#  combination of that roll and the squeeze cycle below.
-#
-#  THIS GAIT DEPENDS ON THE GRIP PADS IN THE XML
-#  ───────────────────────────────────────────────────────────────────────
-#  With bare-plastic friction (mu = 1.0) no gait in this family climbs at
-#  all -- the robot grips the pole happily but makes no net height. mu = 2.0,
-#  which assumes soft high-grip elastomer pads on the modules, is what makes
-#  the climb possible. Measured during the climb, the gait demands mu = 1.20
-#  at the 95th percentile against the 2.0 available, so roughly a 1.7x
-#  margin. The robot model itself is untouched -- only the pad material.
-#
-#  WHERE THE ROTATION FORMULA LIVES  (two-wave serpenoid template)
-#  ───────────────────────────────────────────────────────────────────────
-#  Both gaits in this file are the standard two-wave template used in the
-#  limbless-robot literature (Chong et al.; the same template Hirose's
-#  serpenoid curve generalises to):
-#
-#      alpha_y(t,i) = A_y * sin(omega*t + 2*pi*i*n_y/N + Delta_d)     yaw
-#      alpha_p(t,i) = A_p * sin(omega*t + 2*pi*i*n_p/N)               pitch
-#
-#  with A the amplitudes, n the number of spatial waves along the body,
-#  omega the temporal frequency, N = 9 joint pairs, and Delta_d the phase
-#  offset between the two waves. Delta_d is the ROTATION knob: a full body
-#  revolution about the body axis happens only at Delta_d = +-pi/2, and
-#  rolling is the special case A_y = A_p, n_y = n_p = 0, Delta_d = -pi/2,
-#  which collapses to alpha_y = A sin(omega t), alpha_p = A cos(omega t).
-#
-#  In this file the template appears twice:
-#    approach_cmd() above  -- the ground gait. A_y=45 deg, A_p=30 deg,
-#                             n_y=n_p=1.5, omega=2, Delta_d=+pi/2
-#                             (DELTA_D_APPROACH). That is sidewinding.
-#    coil_pose() below     -- the climbing gait, XI*n playing the role of
-#                             2*pi*i*n/N, and `phase` the role of omega*t.
-#
-#  NOTE ON SIGN: coil_pose() puts the offset on the PITCH term while the
-#  template puts it on the yaw, so DELTA here equals -Delta_d. The shipped
-#  DELTA = 98 deg therefore means Delta_d = -98 deg, 8 degrees off the
-#  -90 deg of the canonical rolling case.
-#
-#  THE CANONICAL ROLLING CASE IS ALSO AVAILABLE, AND IT IS FASTER
-#  ───────────────────────────────────────────────────────────────────────
-#  Setting A_YAW = A_PITCH = 65 deg, XI = 0, DELTA = 90 deg (Delta_d =
-#  -90 deg) and PHASE0 = -90 deg is exactly the template's rolling gait.
-#  Measured: it reaches the top in 50 s at 8.45 cm/s, against 102 s and
-#  3.67 cm/s for the shipped gait -- about 2.3x faster.
-#
-#  It is not the default only because it is rougher at the finish: holding
-#  at the top it trips the QVEL_LIMIT divergence guard after ~3 s, where the
-#  shipped gait ends cleanly. Both roll about equally (-0.87 vs -0.86
-#  revolutions per cycle), so the default trades speed for a tidy ending.
-#  Switch to it by changing those four constants.
-#
-#  PHASE0 matters as much as DELTA: the same rolling gait started at
-#  PHASE0 = 0 instead of -90 deg climbs 0.07 m rather than 2.5 m, because
-#  PHASE0 sets the shape the snake first closes around the pole with.
-#
-#  TUNING GUIDE   (watch the startup diagnostic after any change)
-#  ───────────────────────────────────────────────────────────────────────
-#  A_YAW, A_PITCH   How hard the clamp squeezes. The window is NARROW:
-#                   82/70 climbs the full pole, while 80/68 and 84/72 both
-#                   fail to lift off at all. Change these in 1 deg steps and
-#                   re-check, or not at all.
-#  DELTA            Offset between the yaw and pitch waves, and the knob that
-#                   creates the breathing. At 90 deg the radius barely moves
-#                   (a fixed ring, no ratchet, no climb). 95-98 deg works;
-#                   101 deg already fails.
-#  XI               Spatial phase gradient per pair. 0 here, so every pair
-#                   clamps together. Non-zero values were swept repeatedly
-#                   and always did worse -- above about 20 deg the snake
-#                   leaves the pole entirely.
-#  OMEGA_CLIMB      Clamp/release cycles per second (rad/s of phase). 1.5 and
-#                   2.0 both climb the full pole; 0.75 does not lift off.
-#  SPIN             Direction of the cycle. +1 climbs, -1 does not.
-A_YAW    = deg2rad(82)
-A_PITCH  = deg2rad(70)
-XI       = deg2rad(0)
-DELTA    = deg2rad(98)
-OMEGA_CLIMB = 2.0    # rad/s of phase advance (clamp/release rate)
-SPIN        = +1     # +1 climbs, -1 does not
+# PSI_DOT     Rolling speed, the rate psi_roll advances in eq. (33). This is
+#             the ONLY thing that produces climbing. The target form does not
+#             change as psi_roll advances; the body rolls around it, and the
+#             wrap screws itself along the pole. The paper used pi/2 rad/s.
+#             SPIN picks which way.
+ALPHA = 0.25                 # rad – pitch angle of the target helix
+GAMMA_MIN = 0.01 * np.pi     # rad – case-D threshold, eq. (22); paper's value
+PSI_DOT = 0.5 * np.pi        # rad/s – rolling velocity, eq. (33)
+SPIN = +1                    # +1 climbs, -1 descends
 
-# Where in the grip cycle the body is when it first coils onto the pole. This
-# matters more than it looks: the wrap target is coil_pose(PHASE0), so PHASE0
-# decides which shape the snake closes around the pole with, and a different
-# starting shape grabs the pole differently. Measured: the same gait run from
-# two different PHASE0 values climbed 3.0 m and 0.07 m respectively.
-PHASE0 = deg2rad(0)
+# Compliance gain per joint, in the robot's own J1..J18 order. The paper used
+# 0.04 over the outermost four joints of 28 and 0.08 in between; the same
+# fraction of 18 joints is three at each end.
+K_GAIN = np.full(NJ, 0.08)
+K_GAIN[:3] = 0.04
+K_GAIN[-3:] = 0.04
 
-# Stop cycling near the top of the pole and just hold on, instead of driving
-# on and sliding off the end. The pole is 3.0 m tall and the wrapped body
-# spans roughly 0.25 m of it, so the coil starts running out of pole once the
-# centre of mass passes about 2.6 m. Measured: with this set to 2.75 the robot
-# overran the top and fell the whole way down.
-STOP_HEIGHT = 2.55   # m -- freeze the grip cycle above this height
+# Handedness of the wrap. Either sign wraps the pole perfectly well; it decides
+# which way the body spirals, and together with SPIN, which way rolling drives
+# it. Measured from a pre-wrapped start, 38 s of rolling each:
+#     SPIN +1, LEAD +1 : +0.95 m      SPIN +1, LEAD -1 : -0.38 m
+#     SPIN -1, LEAD -1 : +0.93 m      SPIN -1, LEAD +1 : -0.34 m
+# i.e. the two matching pairs climb and the two mixed pairs slide off. The
+# matching pairs are mirror images of each other, so either will do.
+LEAD_SIGN = +1.0
 
+# The paper's snake robot runs its control loop at 10 Hz (0.1 s sampling), and
+# so does this. Everything in between is held, exactly as on hardware.
+CONTROL_PERIOD = 0.1         # s
 
-def coil_pose(phase):
-    """Joint targets for the wrapped coil at a given point in the grip cycle."""
-    joints = np.zeros(18)
-    for n in range(1, N + 1):
-        joints[2 * n - 2] = A_YAW * np.sin(XI * n + phase)
-        joints[2 * n - 1] = A_PITCH * np.sin(XI * n + phase + DELTA)
-    return joints
+# ── Catching the pole in the first place ────────────────────────────────────
+#
+# The paper does not address this: in all four of its experiments the robot
+# STARTS wrapped around the pipe as a normal helix, placed there by hand, and
+# the method begins from that. Here the robot has to get there off the floor,
+# so the shape it closes with is its own parameter set -- still a normal helix
+# from the same eq. (32) machinery, just a different helix from the one it
+# climbs with.
+#
+# What a catching shape needs is different from what a climbing shape needs.
+# It has to be a nearly FLAT ring (a steeply pitched helix screws off the pole
+# instead of closing around it) and TIGHT (looser than the pole plus the body
+# and the robot hangs off rather than gripping). Swept over pitch angle, radius
+# and roll phase, counting how far the closed body actually sweeps around the
+# pole axis and how many pole contacts it ends up with:
+#
+#     pitch  radius  psi     sweep   contacts   axis vertical?
+#      0.10   0.065  pi/2   -1.37 turns   19      yes  <- used here
+#      0.10   0.075  pi/2   -1.42 turns   12      yes
+#      0.02   0.065  pi/2   -1.16 turns   12      yes
+#      0.25   0.065  0      -0.07 turns    0      no   (screws off)
+#      0.10   0.065  0      -0.08 turns    0      no   (closes the wrong way)
+#
+# PSI_WRAP matters as much as the shape: it sets WHICH PLANE the ring closes
+# in. At psi = 0 this robot closes a ring standing up in a vertical plane,
+# which simply misses the pole; at pi/2 it closes a ring lying in a horizontal
+# plane, which catches it.
+WRAP_ALPHA = 0.10            # rad – nearly flat, so the ring closes around the pole
+WRAP_R0 = 0.065              # m   – tighter than the pole plus the body, so it grips
+PSI_WRAP = 0.5 * np.pi       # rad – roll phase, i.e. which plane the ring closes in
+
+# Once caught, the pitch angle is opened from WRAP_ALPHA up to the climbing
+# ALPHA over this long, rather than jumped, so the body stretches into its
+# working helix while it is already holding on.
+ALPHA_RAMP = 3.0             # s
+
+controller = hr.HelicalRollingController(
+    backbone.link_lengths, alpha=WRAP_ALPHA, K=K_GAIN,
+    mode='outside',          # the robot wraps the OUTSIDE of the pole
+    gamma_min=GAMMA_MIN,
+)
+
+# The form the robot first closes around the pole, built through the same
+# eq. (32) approximation the adaptive loop uses, so handing over to the loop
+# changes nothing about how the target is expressed.
+WRAP_TARGET = controller.normal_helix_target(WRAP_R0, PSI_WRAP, lead_sign=LEAD_SIGN)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STARTUP DIAGNOSTIC – measure the wrapped shape before running anything
+# STARTUP DIAGNOSTIC – what shape is actually being commanded
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# What decides whether this gait can climb is how far the commanded coil
-# radius BREATHES across a phase cycle. Both ends of the cycle are usually
-# tighter than the 7.0 cm at which the body would just touch the pole
-# (4.0 cm pole + 3.0 cm body), so the body does not actually let go of the
-# pole at any point -- the pole holds it open and what varies is how hard it
-# is squeezed. The ratchet runs on that varying squeeze pressure.
-#
-# So the number that matters is the SWING, not whether the coil opens past
-# the pole. A shape whose radius barely moves cannot ratchet at all: it just
-# hangs on. Measured on the old contact model:
-#     6.94 -> 6.96 cm (0.02 cm swing)  holds on, never climbs  [the old gait]
-#
-# Deliberately NOT reported: a predicted climb speed. The obvious estimate
-# (treat the motion as a rigid screw and read off its lead) was tried and is
-# not trustworthy here -- the body deforms as it cycles (5-16 mm off rigid),
-# and that estimate rates the jamming shape as the best climber of all.
-# Climb rate is quoted from physics only.
-def _shape_geometry(n_phases=16):
+# Unlike the old breathing-coil gait, there is no "does it breathe enough"
+# question to answer here: the target form is a helix and stays one. What is
+# worth checking before a run is that the helix eq. (32) produces is the helix
+# that was asked for -- with 18 joints over roughly one turn the approximation
+# is a polygon, and how good a polygon matters. So measure it: put the robot in
+# the commanded pose, run forward kinematics, and fit a helix to the result.
+def _report_wrap_shape():
     probe = mujoco.MjData(model)
-
-    def backbone(ph):
-        mujoco.mj_resetData(model, probe)
-        probe.qpos[0:3] = 0.0
-        probe.qpos[3] = 1.0
-        probe.qpos[4:7] = 0.0
-        probe.qpos[7:25] = coil_pose(ph)
-        mujoco.mj_forward(model, probe)
-        return np.array([probe.xpos[b].copy() for b in BODY_IDS])
-
-    def fit_for_axis(P, a):
-        a = a / np.linalg.norm(a)
-        ref = np.array([1.0, 0.0, 0.0])
-        if abs(a @ ref) > 0.9:
-            ref = np.array([0.0, 1.0, 0.0])
-        u = np.cross(a, ref); u /= np.linalg.norm(u)
-        v = np.cross(a, u)
-        x, y, h = P @ u, P @ v, P @ a
-        sol, *_ = np.linalg.lstsq(np.column_stack([x, y, np.ones_like(x)]),
-                                  x ** 2 + y ** 2, rcond=None)
-        cx, cy = sol[0] / 2, sol[1] / 2
-        R = np.sqrt(max(sol[2] + cx ** 2 + cy ** 2, 1e-12))
-        rr = np.hypot(x - cx, y - cy)
-        th = np.unwrap(np.arctan2(y - cy, x - cx))
-        sol2, *_ = np.linalg.lstsq(np.column_stack([th, np.ones_like(th)]), h, rcond=None)
-        cost = (np.sqrt(np.mean((rr - R) ** 2))
-                + np.sqrt(np.mean((h - (sol2[0] * th + sol2[1])) ** 2)))
-        # cost FIRST: these tuples get compared directly to pick the best axis
-        return cost, R, abs(2 * np.pi * sol2[0]), abs(th[-1] - th[0]) / (2 * np.pi)
-
-    # coarse axis search (Fibonacci hemisphere), then local refinement
-    i = np.arange(600) + 0.5
-    z = 1.0 - i / 600
-    rad = np.sqrt(np.clip(1 - z * z, 0, 1))
-    ang = np.pi * (1 + 5 ** 0.5) * i
-    axes = np.stack([rad * np.cos(ang), rad * np.sin(ang), z], axis=1)
-
-    out = []
-    for ph in [2 * np.pi * k / n_phases for k in range(n_phases)]:
-        P = backbone(ph)
-        best = min((fit_for_axis(P, a), tuple(a)) for a in axes)
-        a0 = np.array(best[1]); step = 0.05
-        for _ in range(4):
-            ref = np.array([1.0, 0.0, 0.0])
-            if abs(a0 @ ref) > 0.9:
-                ref = np.array([0.0, 1.0, 0.0])
-            u = np.cross(a0, ref); u /= np.linalg.norm(u)
-            v = np.cross(a0, u)
-            for du in (-step, 0.0, step):
-                for dv in (-step, 0.0, step):
-                    cand = a0 + du * u + dv * v
-                    f = fit_for_axis(P, cand)
-                    if f < best[0]:
-                        best = (f, tuple(cand / np.linalg.norm(cand)))
-            a0 = np.array(best[1]); step *= 0.4
-        out.append(best[0])                            # (cost, radius, pitch, turns)
-    radii = [o[1] for o in out]
-    turns = [o[3] for o in out]
-    return min(radii), max(radii), min(turns), max(turns)
+    mujoco.mj_resetData(model, probe)
+    probe.qpos[3] = 1.0
+    probe.qpos[7:7 + NJ] = WRAP_TARGET
+    mujoco.mj_forward(model, probe)
+    return hr.fit_helix(backbone.nodes(model, probe))
 
 
-_r_min, _r_max, _turn_min, _turn_max = _shape_geometry()
-_BODY_RADIUS = 0.043          # L-link convex hull, the fattest part of the body
-_needed = PIPE_RADIUS + _BODY_RADIUS
+_fit = _report_wrap_shape()
 print("=" * 70)
-print("GRIP CYCLE (measured by forward kinematics over one full phase cycle)")
+print("TARGET FORM  (adaptive helical rolling, Takemori et al. 2023)")
 print("=" * 70)
-print(f"  pole contact  : needs {_needed*100:5.2f} cm of coil radius "
-      f"(pole {PIPE_RADIUS*100:.1f} + body {_BODY_RADIUS*100:.1f})")
-# These are the COMMANDED coil radii in free space. The pole physically holds
-# the body open, so the interference below is not how far anything sinks in --
-# measured penetration during the climb is about 3.5 mm. It is a measure of
-# how hard the motors are asked to squeeze.
-print(f"  hard squeeze  : {_r_min*100:5.2f} cm  -> commands "
-      f"{(_needed - _r_min)*1000:5.1f} mm of interference")
-print(f"  light squeeze : {_r_max*100:5.2f} cm  -> commands "
-      f"{(_needed - _r_max)*1000:5.1f} mm of interference")
-print(f"  breathing     : {(_r_max - _r_min)*100:5.2f} cm of swing "
-      f"-- this is what drives the ratchet")
-print(f"  wraps of grip : {_turn_min:.2f} - {_turn_max:.2f} turns around the pole")
-if (_r_max - _r_min) < 0.005:
-    print("  WARNING: the coil barely breathes, so there is no clamp/release cycle.")
-    print("           It will hold onto the pole without climbing. Adjust DELTA.")
+print(f"  robot         : {backbone.n_link} links, {backbone.n_joint} joints, "
+      f"{backbone.link_lengths.sum()*100:.1f} cm of backbone")
+print(f"                  link lengths alternate "
+      f"{backbone.link_lengths[1]*1000:.0f}/{backbone.link_lengths[2]*1000:.0f} mm, "
+      f"so the paper's single l is a per-link array here")
+print(f"  pole          : radius {PIPE_RADIUS*100:.1f} cm; a climbing run settles at "
+      f"about {SETTLED_RADIUS*100:.1f} cm of coil radius")
+print(f"  catching form : normal helix, r = {WRAP_R0*100:5.2f} cm at pitch angle "
+      f"{WRAP_ALPHA:.2f} rad, roll phase {PSI_WRAP:.2f} rad")
+print(f"  what eq. (32) : r = {_fit['radius']*100:5.2f} cm, pitch angle "
+      f"{_fit['pitch_angle']:.2f} rad, {abs(_fit['turns']):.2f} turns")
+print(f"    actually got  fit residual {_fit['residual']*1000:.1f} mm, from approximating a "
+      f"helix with only {backbone.n_joint/abs(_fit['turns']):.0f} joints per turn.")
+print( "                  The catching form is the coarsest shape in the run -- a tight")
+print( "                  coil -- so its pitch angle comes out well off what was asked,")
+print( "                  which does not matter: all it has to do is close on the pole.")
+print(f"  climbing form : pitch angle opened to {ALPHA:.2f} rad over "
+      f"{ALPHA_RAMP:.0f} s once the pole is caught")
+print(f"  compliance    : K = {K_GAIN.min():.2f} at the ends, {K_GAIN.max():.2f} "
+      f"in the middle, so each 0.1 s tick")
+print(f"                  asks for a cross-section {K_GAIN.max()*100:.0f}% tighter "
+      f"than the one measured")
+print(f"  rolling       : psi_roll advances {SPIN*PSI_DOT:+.2f} rad/s -- the only "
+      f"term that climbs")
+if abs(_fit['turns']) < 1.0:
+    print("  WARNING: the catching form is less than one full wrap, so it cannot")
+    print("           close around the pole. Lower WRAP_R0 or WRAP_ALPHA.")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # INITIAL POSE  (flat on the ground, near the pipe -- NOT wrapped)
@@ -352,44 +332,41 @@ T_PROBE = 10.5                        # s
 _placement_probe = mujoco.MjData(model)
 mujoco.mj_resetData(model, _placement_probe)
 _placement_probe.qpos[0:2] = _PROBE_START
-_placement_probe.qpos[2]   = GROUND_Z
+_placement_probe.qpos[2] = GROUND_Z
 _placement_probe.qpos[3:7] = Q_LYING_FLAT
 mujoco.mj_forward(model, _placement_probe)
 _tail0 = _placement_probe.qpos[0:2].copy()
 _probe_dt = model.opt.timestep
 for _step in range(int(T_PROBE / _probe_dt)):
-    _placement_probe.ctrl[:18] = approach_cmd(_step * _probe_dt)
+    _placement_probe.ctrl[:NJ] = approach_cmd(_step * _probe_dt)
     mujoco.mj_step(model, _placement_probe)
 _tail_displacement = _placement_probe.qpos[0:2].copy() - _tail0
 
 mujoco.mj_resetData(model, data)
 data.qpos[0:2] = -_tail_displacement
-data.qpos[2]   = GROUND_Z
+data.qpos[2] = GROUND_Z
 data.qpos[3:7] = Q_LYING_FLAT
 mujoco.mj_forward(model, data)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # VIEWER
 # ─────────────────────────────────────────────────────────────────────────────
-viewer = mujoco_viewer.MujocoViewer(model, data)
-
 dt = model.opt.timestep
+
+viewer = None
+if not HEADLESS:
+    import mujoco_viewer
+    viewer = mujoco_viewer.MujocoViewer(model, data)
 
 # Rendering, not physics, decides how long this takes to watch. Measured here:
 # physics costs 0.06 s of wall clock per simulated second (16x faster than
 # real time), while one viewer frame costs ~48 ms -- and that cost does not
 # change with window size, so it is vsync/driver bound, not fill-rate bound.
-#
-# Redrawing every 10th step (the old setting, inherited from robot_command.py)
-# meant 100 frames per simulated second = ~4.8 s of rendering per simulated
-# second. The run played at 1/4 speed, so the climb -- which happens between
-# roughly t=60 s and t=200 s of simulated time -- needed ~16 minutes of
-# watching to get anywhere, and the first thing on screen was 2 minutes of
-# crawling and coiling. Pace the frames instead: one frame every
+# Pace the frames rather than rendering every Nth step blindly: one frame every
 # RENDER_EVERY steps gives the playback speed below.
 TARGET_SPEEDUP = 3.0    # simulated seconds to play per wall-clock second
-TARGET_FPS     = 15.0   # frames per wall-clock second
-RENDER_EVERY   = max(1, int(round(TARGET_SPEEDUP / (TARGET_FPS * dt))))
+TARGET_FPS = 15.0       # frames per wall-clock second
+RENDER_EVERY = max(1, int(round(TARGET_SPEEDUP / (TARGET_FPS * dt))))
 
 print()
 print("=" * 70)
@@ -398,55 +375,63 @@ print("=" * 70)
 print(f"Pipe          : radius {PIPE_RADIUS*100:.0f} cm, 3.0 m tall, standing on the floor")
 print(f"Robot start   : x={data.qpos[0]:.3f} m, y={data.qpos[1]:.3f} m, "
       f"z={data.qpos[2]:.3f} m (lying flat on the ground)")
-print("\nPhases: 1) sidewind across the ground to the pipe   (to t~8 s)")
-print("        2) coil around it, one joint pair at a time    (to t~33 s)")
-print("        3) cycle the coil open and shut -- it ratchets up the pipe")
-print("Close the viewer window to stop.")
+print("\nPhases: 1) sidewind across the ground to the pole    (to t~8 s)")
+print("        2) close onto it as a normal helix            (to t~33 s)")
+print("        3) adaptive helical rolling -- measure, squeeze, roll, repeat")
+if not HEADLESS:
+    print("Close the viewer window to stop.")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STATE MACHINE:  approach -> wrapping -> climb
 # ─────────────────────────────────────────────────────────────────────────────
 PROX_PAIR_THRESHOLD = 0.06   # m – a pair starts curling once its body is this close to the pipe
-RAMP_DURATION_PAIR  = 1.5    # s – how long one pair takes to go from wave to wrap
-FORCE_WRAP_AFTER    = 20.0   # s – a pair that never got close enough curls anyway, so the
+RAMP_DURATION_PAIR = 1.5     # s – how long one pair takes to go from wave to wrap
+FORCE_WRAP_AFTER = 20.0      # s – a pair that never got close enough curls anyway, so the
                              #     coil closes instead of leaving a slack gap in the loop
-SETTLE_HOLD         = 3.0    # s – hold the closed coil still, letting contacts settle,
-                             #     before starting the grip cycle
-APPROACH_TIMEOUT    = 40.0   # s – safety cutoff if the pipe is never reached
-CLIMB_DURATION      = 110.0  # s – how long to keep climbing (it tops out around 76 s)
+SETTLE_HOLD = 3.0            # s – hold the closed helix still, letting contacts settle and
+                             #     letting the compliance take up the slack, before rolling
+APPROACH_TIMEOUT = 40.0      # s – safety cutoff if the pipe is never reached
+CLIMB_DURATION = 180.0       # s – how long to keep rolling. Measured climb rate
+                             #     is about 2.6 cm/s, so 3 m of pole needs ~115 s.
+
+# Stop rolling near the top of the pole and just hold on, instead of driving on
+# and sliding off the end. The pole is 3.0 m tall and the wrapped body spans
+# roughly 0.15 m of it. Measured from a pre-wrapped start: the robot was still
+# gripping with the centre of mass at 2.94 m and had come off the top by 3.01 m,
+# so freeze a little below that.
+STOP_HEIGHT = 2.80           # m
 
 phase = 'approach'
-held_phase = 0.0          # grip-cycle phase, frozen once the top is reached
+psi_roll = PSI_WRAP
+psi_frozen = False
 top_reached_time = None
 pair_trigger_time = [None] * N
 wrapping_start_time = None
 all_locked_time = None
 climb_start_time = None
+cmd = np.zeros(NJ)
+last_control_t = -1e9
+last_info = None
 
 time_history = []
 com_z_history = []
 
-_total_sim = 33.0 + CLIMB_DURATION   # setup is about 33 simulated seconds
+_total_sim = 33.0 + CLIMB_DURATION
 print()
-print(f"Playback : ~{TARGET_SPEEDUP:.0f}x real time, one frame every {RENDER_EVERY} steps,")
-print(f"           {_total_sim:.0f} simulated seconds in roughly "
-      f"{_total_sim/TARGET_SPEEDUP/60:.1f} minutes of watching.")
-print("Expect   : a steady climb once wrapped -- about 1 m by t~60 s, and the top")
-print("           of the 3 m pole around t~110 s, where it stops and holds on.")
+if not HEADLESS:
+    print(f"Playback : ~{TARGET_SPEEDUP:.0f}x real time, one frame every {RENDER_EVERY} steps,")
+    print(f"           {_total_sim:.0f} simulated seconds in roughly "
+          f"{_total_sim/TARGET_SPEEDUP/60:.1f} minutes of watching.")
 print()
 
 max_steps = int((APPROACH_TIMEOUT + FORCE_WRAP_AFTER + CLIMB_DURATION + 40.0) / dt)
 _wall_start = time.perf_counter()
 _sim_end = 0.0
-viewer_ok = True      # False once the viewer window has gone away
-diverged = False      # True if the solver blew up and we stopped early
+viewer_ok = viewer is not None
+diverged = False
 
-# Divergence threshold, set from measured behaviour rather than guessed:
-#   approach (legitimate transient)   max |qvel|  85
-#   climbing, healthy                             34
-#   holding at the top                            65
-#   the blow-up that flings the robot off        154
-# 120 sits clear above everything legitimate and below the blow-up.
+# Divergence threshold, set from measured behaviour rather than guessed. The
+# approach transient legitimately reaches ~85; a solver blow-up goes past 150.
 QVEL_LIMIT = 120.0
 
 try:
@@ -463,16 +448,18 @@ try:
             if any(tt is not None for tt in pair_trigger_time):
                 phase = 'wrapping'
                 wrapping_start_time = t
-                print(f"PHASE 2: reached the pipe at t={t:.2f}s -- coiling around it...")
+                print(f"PHASE 2: reached the pole at t={t:.2f}s -- closing into a helix...")
             elif t > APPROACH_TIMEOUT:
-                print(f"\nWARNING: never reached the pipe in {APPROACH_TIMEOUT:.0f}s "
+                print(f"\nWARNING: never reached the pole in {APPROACH_TIMEOUT:.0f}s "
                       f"-- check T_PROBE / the placement measurement.")
                 phase = 'wrapping'
                 wrapping_start_time = t
 
         elif phase == 'wrapping':
-            wrap_target = coil_pose(PHASE0)
-            cmd = np.zeros(18)
+            # Ramp each joint pair from the ground gait into the normal helix
+            # as it arrives at the pole, so the body closes onto the pole in
+            # the order it reaches it rather than snapping shut all at once.
+            cmd = np.zeros(NJ)
             for n in range(1, N + 1):
                 if pair_trigger_time[n - 1] is None:
                     if radial_distance(data.xpos[PAIR_BODY_IDS[n - 1]][:2]) < PROX_PAIR_THRESHOLD:
@@ -480,12 +467,12 @@ try:
                     elif (t - wrapping_start_time) > FORCE_WRAP_AFTER:
                         pair_trigger_time[n - 1] = t
                 if pair_trigger_time[n - 1] is None:
-                    alpha = 0.0
+                    alpha_ramp = 0.0
                 else:
-                    alpha = min(1.0, (t - pair_trigger_time[n - 1]) / RAMP_DURATION_PAIR)
+                    alpha_ramp = min(1.0, (t - pair_trigger_time[n - 1]) / RAMP_DURATION_PAIR)
                 yi, pidx = 2 * n - 2, 2 * n - 1
-                cmd[yi]   = (1 - alpha) * a_cmd[yi]   + alpha * wrap_target[yi]
-                cmd[pidx] = (1 - alpha) * a_cmd[pidx] + alpha * wrap_target[pidx]
+                cmd[yi] = (1 - alpha_ramp) * a_cmd[yi] + alpha_ramp * WRAP_TARGET[yi]
+                cmd[pidx] = (1 - alpha_ramp) * a_cmd[pidx] + alpha_ramp * WRAP_TARGET[pidx]
 
             fully_locked = all(tt is not None for tt in pair_trigger_time) and all(
                 (t - tt) >= RAMP_DURATION_PAIR for tt in pair_trigger_time)
@@ -495,19 +482,42 @@ try:
             if all_locked_time is not None and (t - all_locked_time) > SETTLE_HOLD:
                 phase = 'climb'
                 climb_start_time = t
-                print(f"\nPHASE 3: grip cycle starts at t={t:.2f}s -- climbing...\n")
+                last_control_t = -1e9
+                print(f"\nPHASE 3: helical rolling starts at t={t:.2f}s\n")
 
-        else:  # climb -- cycle the coil: clamp, extend, re-clamp, ratcheting up
-            if data.subtree_com[0, 2] < STOP_HEIGHT:
-                held_phase = PHASE0 + SPIN * OMEGA_CLIMB * (t - climb_start_time)
-            elif top_reached_time is None:
-                top_reached_time = t
-                print(f"\nReached the top of the pole at t={t:.1f}s "
-                      f"(height {data.subtree_com[0, 2]:.2f} m) -- holding on.")
-            cmd = coil_pose(held_phase)   # freeze the cycle once at the top
-            # A frozen grip is not a permanent one: held still, the coil creeps
-            # down a few cm every 10 s and eventually lets go. Finish the run
-            # at the top rather than wait for that.
+        else:
+            # ── The paper's control loop, run at its own 10 Hz sampling rate ──
+            #
+            #   1) read the form           backbone.nodes() -- eq. (1)-(4)
+            #   2-7) everything else       controller.target()
+            #
+            # psi_roll advances continuously between ticks; the target form it
+            # rolls around is whatever the last tick measured and squeezed.
+            # Open the pitch angle from the catching helix to the climbing
+            # one. Everything else about the loop is unchanged while this
+            # happens -- it is still measuring and squeezing every tick, so the
+            # robot stretches out while already holding on.
+            controller.alpha = WRAP_ALPHA + (ALPHA - WRAP_ALPHA) * min(
+                1.0, (t - climb_start_time) / ALPHA_RAMP)
+
+            if not psi_frozen:
+                if data.subtree_com[0, 2] < STOP_HEIGHT:
+                    # psi continues from where the catching form left it, so
+                    # the body does not lurch at the hand-off.
+                    psi_roll = PSI_WRAP + SPIN * PSI_DOT * (t - climb_start_time)
+                else:
+                    psi_frozen = True
+                    top_reached_time = t
+                    print(f"\nReached the top of the pole at t={t:.1f}s "
+                          f"(height {data.subtree_com[0, 2]:.2f} m) -- holding on.")
+
+            if (t - last_control_t) >= CONTROL_PERIOD:
+                last_control_t = t
+                nodes = backbone.nodes(model, data)
+                cmd, last_info = controller.target(nodes, psi_roll)
+                cmd = np.clip(cmd, model.jnt_range[1:1 + NJ, 0],
+                              model.jnt_range[1:1 + NJ, 1])
+
             if top_reached_time is not None and (t - top_reached_time) > 5.0:
                 print("Done -- stopping at the top.")
                 break
@@ -515,14 +525,10 @@ try:
                 print("\nClimb duration complete.")
                 break
 
-        data.ctrl[:18] = cmd
+        data.ctrl[:NJ] = cmd
         mujoco.mj_step(model, data)
         _sim_end = t
 
-        # Bail out if the solver has diverged, instead of letting the robot be
-        # flung through the pole. Deep contact interference (this gait commands
-        # 17-29 mm of it) can occasionally produce an enormous impulse, and
-        # once qvel blows up the remaining "motion" is numerical garbage.
         if not np.all(np.isfinite(data.qpos)) or np.max(np.abs(data.qvel)) > QVEL_LIMIT:
             print(f"\nSTOPPED at t={t:.2f}s: the physics diverged "
                   f"(max |qvel| = {np.max(np.abs(data.qvel)):.0f}, limit {QVEL_LIMIT:.0f}).")
@@ -530,10 +536,7 @@ try:
             diverged = True
             break
 
-        # Render only while the window is really open. mujoco_viewer.render()
-        # raises if the window has been closed, and closing it is exactly how
-        # this script tells you to stop -- so check first and guard the call.
-        if viewer.is_alive and step % RENDER_EVERY == 0:
+        if viewer_ok and viewer.is_alive and step % RENDER_EVERY == 0:
             try:
                 viewer.render()
             except Exception as exc:                     # window died mid-frame
@@ -546,9 +549,20 @@ try:
             com_z_history.append(float(data.subtree_com[0, 2]))
 
         if step % 2000 == 0:
-            n_wrapped = sum(1 for tt in pair_trigger_time if tt is not None)
-            print(f"t={t:6.1f}s | {phase:8s} | height={data.subtree_com[0, 2]:.3f} m "
-                  f"| wrapped={n_wrapped}/{N}")
+            if phase == 'climb' and last_info is not None:
+                # r_meas is the coil radius the pole is actually holding the
+                # robot at; r_cmd is what the compliance term just asked for.
+                # The gap between them IS the grip: it is the deflection the
+                # position servos are pressing into the pole.
+                print(f"t={t:6.1f}s | climb    | height={data.subtree_com[0, 2]:.3f} m "
+                      f"| r={last_info['radius_measured']*100:5.2f}cm "
+                      f"-> {last_info['radius_target']*100:5.2f}cm "
+                      f"| {last_info['turns']:.2f} turns "
+                      f"| axis tilt {np.degrees(np.arccos(np.clip(abs(last_info['axis'][2]), 0, 1))):4.1f} deg")
+            else:
+                n_wrapped = sum(1 for tt in pair_trigger_time if tt is not None)
+                print(f"t={t:6.1f}s | {phase:8s} | height={data.subtree_com[0, 2]:.3f} m "
+                      f"| wrapped={n_wrapped}/{N}")
 
         if viewer_ok and not viewer.is_alive:
             print("\nViewer closed by user.")
@@ -557,15 +571,16 @@ try:
 except KeyboardInterrupt:
     print("\nInterrupted by user.")
 
-try:
-    viewer.close()
-except Exception:
-    pass
+if viewer is not None:
+    try:
+        viewer.close()
+    except Exception:
+        pass
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary
 # ─────────────────────────────────────────────────────────────────────────────
-time_history  = np.array(time_history)
+time_history = np.array(time_history)
 com_z_history = np.array(com_z_history)
 
 print("\n" + "=" * 70)
@@ -587,23 +602,25 @@ if len(com_z_history) > 10:
     print(f"Longest single climb  : {best_span:.3f} m at {best_rate*100:.2f} cm/s")
     print(f"Height at end         : {com_z_history[-1]:.3f} m")
 else:
-    print("Climb phase never started -- the robot did not wrap the pipe.")
+    print("Climb phase never started -- the robot did not wrap the pole.")
 _wall = time.perf_counter() - _wall_start
 if _wall > 0 and _sim_end > 0:
     print(f"Playback speed        : {_sim_end/_wall:.1f}x real time "
           f"({_sim_end:.0f} simulated s in {_wall/60:.1f} min of wall clock)")
-    print(f"                        raise TARGET_SPEEDUP for a faster, choppier replay")
 print("=" * 70)
 print()
-print("TUNING TIPS")
-print("  - No breathing in the startup diagnostic -> the coil never releases, so")
-print("    it will hold onto the pipe without ever climbing. Adjust DELTA.")
-print("  - Climbs then slides back down -> grip is marginal; nudge A_YAW and")
-print("    A_PITCH up together by 1-2 deg, or lower OMEGA_CLIMB.")
-print("  - Never leaves the floor -> the operating window is narrow. 82/70 with")
-print("    DELTA=98 climbs; 80/68, 84/72 and DELTA=101 all fail to lift off.")
-print("  - Never reaches the pipe -> adjust T_PROBE.")
-print("  - Wraps but will not lift -> check SPIN (+1 climbs) and PHASE0, which")
-print("    decides the shape it first grabs the pole with and matters a lot.")
-print("  - 'physics diverged' -> the run was stopped on purpose rather than let")
-print("    the robot be flung through the pole. Usually happens only at the top.")
+print("TUNING GUIDE  (all four knobs are in the PHASE 2/3 block above)")
+print("  - Wraps but will not lift  -> flip SPIN, or flip LEAD_SIGN. Those two")
+print("    together set which way the screw turns; one combination climbs.")
+print("  - Climbs then slides back  -> the grip is marginal. Raise K, or lower")
+print("    ALPHA so more of the body lies against the pole per turn.")
+print("  - Squeezes itself off the pole, or the ends flail -> lower the end")
+print("    values in K_GAIN; cantilevered ends curl into the air if squeezed.")
+print("  - 'r=... -> ...' in the log shows the measured coil radius and the one")
+print("    the compliance asked for. If they are equal the robot is not gripping")
+print("    at all; if the gap is much larger than K the wrap has come off.")
+print("  - Fewer than 1.0 turns in the log -> the coil cannot hold. Lower ALPHA.")
+print("  - Never reaches the pole   -> adjust T_PROBE.")
+print("  - Reaches the pole but does not catch it -> that is WRAP_ALPHA/WRAP_R0/")
+print("    PSI_WRAP, not the climbing parameters. PSI_WRAP decides which plane")
+print("    the ring closes in and is the one that most often needs changing.")

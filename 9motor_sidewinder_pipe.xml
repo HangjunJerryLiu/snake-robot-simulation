@@ -1,0 +1,245 @@
+<mujoco model="9motor_octa_sindwinder_assembly">
+  <compiler angle="radian"/>
+  <option gravity="0 0 -9.81" timestep="0.001"/>
+
+  <!--
+    VISUAL SETTINGS.  Rendering only - no body, joint, mass, geom size or
+    contact parameter is touched here, so a run is bit-for-bit what it was
+    before.  The robot climbs 3 m up a 4 cm pole, which is a tall thin scene:
+    the defaults clip the shadows, wash out the pole against the sky and put
+    the near plane far enough out that a close camera cuts into the body.
+  -->
+  <visual>
+    <headlight ambient="0.35 0.36 0.4" diffuse="0.45 0.45 0.45" specular="0.2 0.2 0.2"/>
+    <global offwidth="1920" offheight="1080" azimuth="135" elevation="-12"/>
+    <!-- znear small enough to sit right next to the robot; shadowclip covers
+         the whole 3 m pole so the shadow does not stop halfway up. -->
+    <map znear="0.004" zfar="40" shadowclip="4" shadowscale="0.6" force="0.008"/>
+    <quality shadowsize="4096" offsamples="8" numslices="48"/>
+    <!-- Haze fades the far floor into the skybox instead of ending it on a
+         hard line at the edge of the plane. -->
+    <rgba haze="0.55 0.62 0.72 1"/>
+    <scale contactwidth="0.03" contactheight="0.012" forcewidth="0.012"
+           framelength="0.08" framewidth="0.006" jointlength="0.05"
+           jointwidth="0.006"/>
+  </visual>
+  <default>
+  <!--  High friction in ALL directions for pipe gripping (condim=4 = elliptic cone)  -->
+  <!--
+    CONTACT MATERIAL.  friction = "sliding torsional rolling".
+    Only the surface properties are changed here - every body, mesh, mass,
+    joint and geometry in this file is exactly as authored.
+
+    sliding 2.0      Assumes high-grip elastomer pads (soft silicone) on the
+                     modules.  Measured: at bare-plastic friction (1.0) this
+                     robot cannot climb at all; it grips the pole but makes
+                     no net height.  The previous value, 4.0, is beyond any
+                     real material pair and was doing the climbing by itself:
+                     dropping it to 1.0 alone left the robot on the floor.
+    torsional 0.02   Resistance to spinning about the contact normal, in
+                     metres.  It is roughly (patch radius), so 0.02 is a
+                     1-2 cm patch - reasonable for a soft pad pressed onto a
+                     pole.  The previous 0.3 implies a 30 cm patch and was,
+                     on its own, holding the robot up.
+    margin 0.001     1 mm.  Kept from the original, and defensible as pad
+                     compliance: the pads really do deform by about that
+                     much under the measured contact forces.
+  -->
+  <geom condim="4" friction="2.0 0.02 0.0001" margin="0.001" solimp="0.95 0.99 0.001" solref="0.01 1"/>
+  </default>
+
+  <asset>
+    <!-- Sky. Purely so the scene has a horizon to read height against. -->
+    <texture name="sky" type="skybox" builtin="gradient"
+             rgb1="0.35 0.47 0.66" rgb2="0.78 0.84 0.90" width="512" height="512"/>
+    <texture name="grid" type="2d" builtin="checker" rgb1="0.1 0.2 0.3" rgb2="0.2 0.3 0.4" width="512" height="512"/>
+    <material name="grid_material" texture="grid" texrepeat="10 10" texuniform="true" reflectance="0.1"/>
+    <!-- Pipe material: brown, slightly shiny -->
+    <material name="pipe_material" rgba="0.55 0.27 0.07 1" reflectance="0.3"/>
+    <mesh name="tail" content_type="model/stl" file="tail.STL"/>
+    <mesh name="M1" content_type="model/stl" file="M1.STL"/>
+    <mesh name="L1" content_type="model/stl" file="L1.STL"/>
+    <mesh name="M2" content_type="model/stl" file="M2.STL"/>
+    <mesh name="L2" content_type="model/stl" file="L2.STL"/>
+    <mesh name="M3" content_type="model/stl" file="M3.STL"/>
+    <mesh name="L3" content_type="model/stl" file="L3.STL"/>
+    <mesh name="M4" content_type="model/stl" file="M4.STL"/>
+    <mesh name="L4" content_type="model/stl" file="L4.STL"/>
+    <mesh name="M5" content_type="model/stl" file="M5.STL"/>
+    <mesh name="L5" content_type="model/stl" file="L5.STL"/>
+    <mesh name="M6" content_type="model/stl" file="M6.STL"/>
+    <mesh name="L6" content_type="model/stl" file="L6.STL"/>
+    <mesh name="M7" content_type="model/stl" file="M7.STL"/>
+    <mesh name="L7" content_type="model/stl" file="L7.STL"/>
+    <mesh name="M8" content_type="model/stl" file="M8.STL"/>
+    <mesh name="L8" content_type="model/stl" file="L8.STL"/>
+    <mesh name="M9" content_type="model/stl" file="M9.STL"/>
+    <mesh name="head" content_type="model/stl" file="head.STL"/>
+  </asset>
+
+  <worldbody>
+    <!--
+      Three lights rather than one: a key light that casts the shadow, a fill
+      from the opposite side so the shaded half of the pole is not black, and
+      a high light so the wrap still reads when the robot is 3 m up and the
+      camera is looking slightly down at it.
+    -->
+    <light name="key" directional="true" castshadow="true"
+           pos="2 2 4" dir="-0.5 -0.5 -1" diffuse="0.55 0.55 0.52" specular="0.25 0.25 0.25"/>
+    <light name="fill" directional="true" castshadow="false"
+           pos="-3 -1 3" dir="0.7 0.3 -1" diffuse="0.22 0.24 0.28"/>
+    <light name="top" directional="true" castshadow="false"
+           pos="0 0 6" dir="0 0 -1" diffuse="0.18 0.18 0.18"/>
+
+    <!--  Floor  -->
+    <geom name="floor" type="plane" size="5 5 0.1" material="grid_material" condim="3" friction="0.9 0.005 0.0001"/>
+
+    <!--
+      PIPE: vertical cylinder along the Z-axis.
+        size="radius half_height" → radius=0.04 m, total height=3.0 m
+        pos="0 0 1.5"             → center at z=1.5 so the pipe runs from z=0 to z=3.0
+
+      TUNING:
+        - Increase radius (e.g. 0.06) if the robot body is too thick to wrap tightly.
+        - Increase half_height (e.g. 2.5) for a taller pipe.
+        - friction="X Y Z": X=sliding, Y=torsional, Z=rolling.
+          High X (3.0+) is critical so the robot can push off the pipe surface.
+        - condim="4" enables the elliptic friction cone, which handles
+          oblique contact forces much better than condim=3 for cylindrical surfaces.
+    -->
+    <geom name="pipe" type="cylinder"
+          size="0.04 1.5"
+          pos="0 0 1.5"
+          material="pipe_material"
+          condim="4"
+          friction="2.0 0.02 0.0001"
+          solimp="0.95 0.99 0.001"
+          solref="0.01 1"/>
+
+    <!--
+      ROBOT: tail body
+        pos is the XML reference pose – the actual starting pose is overridden
+        in Python via data.qpos[0:7] before the simulation begins.
+        We set it close to the pipe surface here as a fallback reference.
+          x = pipe_radius + body_clearance = 0.04 + 0.025 = 0.065 m
+          z = 0.30 m (near the bottom of the pipe, above the floor)
+    -->
+    <body name="tail" pos="0.065 0 0.30">
+      <inertial pos="0.0085891 0 0" quat="0.653281 -0.270598 0.270598 0.653281" mass="0.019811" diaginertia="0.00015 0.00015 0.00015"/>
+      <joint name="floating_base" type="free"/>
+      <geom type="mesh" rgba="1 0.5 0.50196 1" mesh="tail"/>
+      <body name="M1" pos="0.028 0 0" quat="0.707105 0.707108 0 0">
+        <inertial pos="0.012 0.00058697 0.00058706" quat="0.653531 0.269638 -0.271557 0.653031" mass="0.058086" diaginertia="0.000150344 0.00015 0.000149656"/>
+        <joint name="J1" pos="0 0 0" axis="0 0 1" range="-1.4 1.4" actuatorfrcrange="-0.8 0.8"/>
+        <geom type="mesh" rgba="0.79216 0.81961 0.93333 1" mesh="M1"/>
+        <body name="L1" pos="0.024 0 0" quat="0.707105 -0.707108 0 0">
+          <inertial pos="0.028 2.2011e-07 -2.2133e-07" quat="0.353493 0.853429 0.146577 0.353859" mass="0.02193" diaginertia="0.00015 0.00015 0.00015"/>
+          <joint name="J2" pos="0 0 0" axis="0 0 1" range="-1.4 1.4" actuatorfrcrange="-0.8 0.8"/>
+          <geom type="mesh" rgba="1 1 0.50196 1" mesh="L1"/>
+          <body name="M2" pos="0.056 0 0" quat="0.707105 0.707108 0 0">
+            <inertial pos="0.012 0.00058697 0.00058706" quat="0.653531 0.269638 -0.271557 0.653031" mass="0.058086" diaginertia="0.000150344 0.00015 0.000149656"/>
+            <joint name="J3" pos="0 0 0" axis="0 0 1" range="-1.4 1.4" actuatorfrcrange="-0.8 0.8"/>
+            <geom type="mesh" rgba="0.79216 0.81961 0.93333 1" mesh="M2"/>
+            <body name="L2" pos="0.024 0 0" quat="0.707105 -0.707108 0 0">
+              <inertial pos="0.028 2.2011e-07 -2.2118e-07" quat="0.353493 0.853429 0.146577 0.353859" mass="0.02193" diaginertia="0.00015 0.00015 0.00015"/>
+              <joint name="J4" pos="0 0 0" axis="0 0 1" range="-1.4 1.4" actuatorfrcrange="-0.8 0.8"/>
+              <geom type="mesh" rgba="1 1 0.50196 1" mesh="L2"/>
+              <body name="M3" pos="0.056 0 0" quat="0.707105 0.707108 0 0">
+                <inertial pos="0.0120001 0.000586973 0.000587064" quat="0.653531 0.269638 -0.271557 0.653031" mass="0.0580857" diaginertia="0.000150344 0.00015 0.000149656"/>
+                <joint name="J5" pos="0 0 0" axis="0 0 1" range="-1.4 1.4" actuatorfrcrange="-0.8 0.8"/>
+                <geom type="mesh" rgba="0.792157 0.819608 0.933333 1" mesh="M3"/>
+                <body name="L3" pos="0.024 0 0" quat="0.707105 -0.707108 0 0">
+                  <inertial pos="0.028 2.20111e-07 -2.21026e-07" quat="0.353493 0.853429 0.146577 0.353859" mass="0.0219299" diaginertia="0.00015 0.00015 0.00015"/>
+                  <joint name="J6" pos="0 0 0" axis="0 0 1" range="-1.4 1.4" actuatorfrcrange="-0.8 0.8"/>
+                  <geom type="mesh" rgba="1 1 0.50196 1" mesh="L3"/>
+                  <body name="M4" pos="0.056 0 0" quat="0.707105 0.707108 0 0">
+                    <inertial pos="0.0120001 0.000586973 0.000587064" quat="0.653531 0.269638 -0.271557 0.653031" mass="0.0580857" diaginertia="0.000150344 0.00015 0.000149656"/>
+                    <joint name="J7" pos="0 0 0" axis="0 0 1" range="-1.4 1.4" actuatorfrcrange="-0.8 0.8"/>
+                    <geom type="mesh" rgba="0.792157 0.819608 0.933333 1" mesh="M4"/>
+                    <body name="L4" pos="0.024 0 0" quat="0.707105 -0.707108 0 0">
+                      <inertial pos="0.028 2.20111e-07 -2.20874e-07" quat="0.353493 0.853429 0.146577 0.353859" mass="0.0219299" diaginertia="0.00015 0.00015 0.00015"/>
+                      <joint name="J8" pos="0 0 0" axis="0 0 1" range="-1.4 1.4" actuatorfrcrange="-0.8 0.8"/>
+                      <geom type="mesh" rgba="1 1 0.50196 1" mesh="L4"/>
+                      <body name="M5" pos="0.056 0 0" quat="0.707105 0.707108 0 0">
+                        <inertial pos="0.0120001 0.000586973 0.000587064" quat="0.653531 0.269638 -0.271557 0.653031" mass="0.0580857" diaginertia="0.000150344 0.00015 0.000149656"/>
+                        <joint name="J9" pos="0 0 0" axis="0 0 1" range="-1.4 1.4" actuatorfrcrange="-0.8 0.8"/>
+                        <geom type="mesh" rgba="0.792157 0.819608 0.933333 1" mesh="M5"/>
+                        <body name="L5" pos="0.024 0 0" quat="0.707105 -0.707108 0 0">
+                          <inertial pos="0.028 2.20111e-07 -2.20721e-07" quat="0.353493 0.853429 0.146577 0.353859" mass="0.0219299" diaginertia="0.00015 0.00015 0.00015"/>
+                          <joint name="J10" pos="0 0 0" axis="0 0 1" range="-1.4 1.4" actuatorfrcrange="-0.8 0.8"/>
+                          <geom type="mesh" rgba="1 1 0.50196 1" mesh="L5"/>
+                          <body name="M6" pos="0.056 0 0" quat="0.707105 0.707108 0 0">
+                            <inertial pos="0.0120001 0.000586973 0.000587064" quat="0.653531 0.269638 -0.271557 0.653031" mass="0.0580857" diaginertia="0.000150344 0.00015 0.000149656"/>
+                            <joint name="J11" pos="0 0 0" axis="0 0 1" range="-1.4 1.4" actuatorfrcrange="-0.8 0.8"/>
+                            <geom type="mesh" rgba="0.792157 0.819608 0.933333 1" mesh="M6"/>
+                            <body name="L6" pos="0.024 0 0" quat="0.707105 -0.707108 0 0">
+                              <inertial pos="0.028 2.20111e-07 -2.20569e-07" quat="0.353493 0.853429 0.146577 0.353859" mass="0.0219299" diaginertia="0.00015 0.00015 0.00015"/>
+                              <joint name="J12" pos="0 0 0" axis="0 0 1" range="-1.4 1.4" actuatorfrcrange="-0.8 0.8"/>
+                              <geom type="mesh" rgba="1 1 0.50196 1" mesh="L6"/>
+                              <body name="M7" pos="0.056 0 0" quat="0.707105 0.707108 0 0">
+                                <inertial pos="0.0120001 0.000586973 0.000587064" quat="0.653531 0.269638 -0.271557 0.653031" mass="0.0580857" diaginertia="0.000150344 0.00015 0.000149656"/>
+                                <joint name="J13" pos="0 0 0" axis="0 0 1" range="-1.4 1.4" actuatorfrcrange="-0.8 0.8"/>
+                                <geom type="mesh" rgba="0.792157 0.819608 0.933333 1" mesh="M7"/>
+                                <body name="L7" pos="0.024 0 0" quat="0.707105 -0.707108 0 0">
+                                  <inertial pos="0.028 2.20111e-07 -2.20416e-07" quat="0.353493 0.853429 0.146577 0.353859" mass="0.0219299" diaginertia="0.00015 0.00015 0.00015"/>
+                                  <joint name="J14" pos="0 0 0" axis="0 0 1" range="-1.4 1.4" actuatorfrcrange="-0.8 0.8"/>
+                                  <geom type="mesh" rgba="1 1 0.50196 1" mesh="L7"/>
+                                  <body name="M8" pos="0.056 0 0" quat="0.707105 0.707108 0 0">
+                                    <inertial pos="0.0120001 0.000586973 0.000587064" quat="0.653531 0.269638 -0.271557 0.653031" mass="0.0580857" diaginertia="0.000150344 0.00015 0.000149656"/>
+                                    <joint name="J15" pos="0 0 0" axis="0 0 1" range="-1.4 1.4" actuatorfrcrange="-0.8 0.8"/>
+                                    <geom type="mesh" rgba="0.792157 0.819608 0.933333 1" mesh="M8"/>
+                                    <body name="L8" pos="0.024 0 0" quat="0.707105 -0.707108 0 0">
+                                      <inertial pos="0.028 2.20111e-07 -2.20264e-07" quat="0.353493 0.853429 0.146577 0.353859" mass="0.0219299" diaginertia="0.00015 0.00015 0.00015"/>
+                                      <joint name="J16" pos="0 0 0" axis="0 0 1" range="-1.4 1.4" actuatorfrcrange="-0.8 0.8"/>
+                                      <geom type="mesh" rgba="1 1 0.50196 1" mesh="L8"/>
+                                      <body name="M9" pos="0.056 0 0" quat="0.707105 0.707108 0 0">
+                                        <inertial pos="0.0120001 0.000586973 0.000587064" quat="0.653531 0.269638 -0.271557 0.653031" mass="0.0580857" diaginertia="0.000150344 0.00015 0.000149656"/>
+                                        <joint name="J17" pos="0 0 0" axis="0 0 1" range="-1.4 1.4" actuatorfrcrange="-0.8 0.8"/>
+                                        <geom type="mesh" rgba="0.792157 0.819608 0.933333 1" mesh="M9"/>
+                                        <body name="head" pos="0.024 0 0" quat="0.707105 -0.707108 0 0">
+                                          <inertial pos="0.0194109 0 0" quat="0.653281 -0.270598 0.270598 0.653281" mass="0.0198108" diaginertia="0.00015 0.00015 0.00015"/>
+                                          <joint name="J18" pos="0 0 0" axis="0 0 1" range="-1.4 1.4" actuatorfrcrange="-0.8 0.8"/>
+                                          <geom type="mesh" rgba="1 1 0.50196 1" mesh="head"/>
+                                        </body>
+                                      </body>
+                                    </body>
+                                  </body>
+                                </body>
+                              </body>
+                            </body>
+                          </body>
+                        </body>
+                      </body>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+  <position name="actuator1"  joint="J1"  kp="10" kv="0.02" ctrlrange="-1.5 1.5"/>
+  <position name="actuator2"  joint="J2"  kp="10" kv="0.02" ctrlrange="-1.5 1.5"/>
+  <position name="actuator3"  joint="J3"  kp="10" kv="0.02" ctrlrange="-1.5 1.5"/>
+  <position name="actuator4"  joint="J4"  kp="10" kv="0.02" ctrlrange="-1.5 1.5"/>
+  <position name="actuator5"  joint="J5"  kp="10" kv="0.02" ctrlrange="-1.5 1.5"/>
+  <position name="actuator6"  joint="J6"  kp="10" kv="0.02" ctrlrange="-1.5 1.5"/>
+  <position name="actuator7"  joint="J7"  kp="10" kv="0.02" ctrlrange="-1.5 1.5"/>
+  <position name="actuator8"  joint="J8"  kp="10" kv="0.02" ctrlrange="-1.5 1.5"/>
+  <position name="actuator9"  joint="J9"  kp="10" kv="0.02" ctrlrange="-1.5 1.5"/>
+  <position name="actuator10" joint="J10" kp="10" kv="0.02" ctrlrange="-1.5 1.5"/>
+  <position name="actuator11" joint="J11" kp="10" kv="0.02" ctrlrange="-1.5 1.5"/>
+  <position name="actuator12" joint="J12" kp="10" kv="0.02" ctrlrange="-1.5 1.5"/>
+  <position name="actuator13" joint="J13" kp="10" kv="0.02" ctrlrange="-1.5 1.5"/>
+  <position name="actuator14" joint="J14" kp="10" kv="0.02" ctrlrange="-1.5 1.5"/>
+  <position name="actuator15" joint="J15" kp="10" kv="0.02" ctrlrange="-1.5 1.5"/>
+  <position name="actuator16" joint="J16" kp="10" kv="0.02" ctrlrange="-1.5 1.5"/>
+  <position name="actuator17" joint="J17" kp="10" kv="0.02" ctrlrange="-1.5 1.5"/>
+  <position name="actuator18" joint="J18" kp="10" kv="0.02" ctrlrange="-1.5 1.5"/>
+  </actuator>
+
+</mujoco>

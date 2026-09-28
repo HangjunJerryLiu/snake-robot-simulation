@@ -1,0 +1,4 @@
+mujoco==3.14.0
+mujoco-python-viewer==0.1.4
+glfw==2.10.2
+numpy==2.5.3
