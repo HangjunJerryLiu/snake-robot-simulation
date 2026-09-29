@@ -489,6 +489,7 @@ class HelicalRollingController:
         pieces, geom = self._helicalize(r_h, phi_h, l_p, line_first,             # 6
                                         end_lines, lead)
         theta = self._approximate(pieces, psi_roll, orient)                       # 7
+        self._pieces = pieces
 
         tgt2d = self._target_cross_section(geom, w)
         c = v2d - v2d.mean(axis=0)
@@ -509,6 +510,16 @@ class HelicalRollingController:
             'pitch_angle': self.alpha,
         }
         return self.to_robot_order(theta), info
+
+    def retarget(self, psi_roll, orient=None):
+        """Step 7 alone: the last target form, re-evaluated at a new psi_roll.
+
+        Estimating the form (steps 1-6) needs a fresh read of the joints and
+        runs at the control rate; rolling the body round that form, eq. (33),
+        needs neither and can be streamed to the servos between ticks.
+        """
+        return self.to_robot_order(self._approximate(self._pieces, psi_roll,
+                                                     orient or _ORIENT))
 
     def normal_helix_target(self, radius, psi_roll, lead_sign=1.0, orient=None):
         """Joint angles for an ordinary helix of the given radius.

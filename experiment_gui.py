@@ -127,8 +127,8 @@ class App:
                  "slider drawn IN that window --")
         self.say("this panel's slider then just mirrors the value; without the viewer "
                  "(or with Immersive off), drag it here instead.")
-        self.say("Measured, held constant for a whole run: mu 1.0 -> 0.99 cm/s, "
-                 "1.5 -> 1.95, 2.0 -> 2.40, 3.0 -> 3.11.")
+        self.say("Measured, held constant for a whole run: mu 0.25 -> 1.47 cm/s, "
+                 "0.3 -> 2.27, 0.5 -> 3.69, 0.8 -> 4.30. Below ~0.25 it slides.")
         self.say("In the 3-D window: SPACE pause | B camera | N annotations | Z panel | "
                  "C contact arrows | H menus")
 
@@ -150,9 +150,9 @@ class App:
 
         ticks = ttk.Frame(frame)
         ticks.grid(row=1, column=0, sticky='ew', padx=(0, 12))
-        for text, anchor in (("0.5", 'w'), ("1.0  bare plastic", 'w'),
-                             ("2.0  grip pads", 'center'),
-                             ("4.0  not a real material", 'e')):
+        for text, anchor in (("0.1", 'w'), ("0.3  plastic", 'w'),
+                             ("0.7  rubber", 'center'),
+                             ("1.5  grip pads", 'e')):
             ttk.Label(ticks, text=text, foreground='#777', font=('Segoe UI', 8),
                       anchor=anchor).pack(side='left', expand=True, fill='x')
 

@@ -11,12 +11,22 @@ Start, and get a labelled CSV of everything that happened.
 
 ## Running it
 
+One-time setup (Python 3.10+; tkinter ships with the python.org installer):
+
+```
+python -m venv .venv
+.venv\Scripts\activate            Windows  (macOS/Linux: source .venv/bin/activate)
+pip install -r requirements.txt
+```
+
+Then:
+
 ```
 python experiment_gui.py          control panel: friction slider, Start / Stop
 python climb_rig.py               one run, headless, defaults
 python climb_rig.py --viewer      one run, watch it (annotated, tracking camera)
 python climb_rig.py --viewer --immersive false    the plain MuJoCo viewer
-python climb_rig.py --mu 1.5 --alpha 0.30 --label soft_pads
+python climb_rig.py --mu 0.3 --alpha 0.30 --label plastic_pipe
 python climb_rig.py --start_wrapped true    skip the approach; test the controller alone
 python sweep_example.py           one parameter at a time, the README table
 ```
@@ -28,26 +38,23 @@ It is also importable, which is how you sweep:
 
 ```python
 from climb_rig import Config, run
-for mu in (1.0, 1.5, 2.0, 2.5):
+for mu in (0.3, 0.5, 0.8, 1.2):
     print(mu, run(Config(mu_robot_pole=mu, label=f"mu{mu}"))['rolling_rate_cm_s'])
 ```
 
 Each run creates `results/<timestamp>_<label>/` holding `run.csv`,
-`joints.csv`, `stages.csv`, `summary.csv` and `config.json`. One example run
-with the defaults is already there.
+`joints.csv`, `stages.csv`, `summary.csv` and `config.json`. The
+`20260923_225741_example` folder is from an earlier version (friction 2.0,
+held setpoints) and no longer matches the defaults.
 
-With the defaults the robot catches the pole at about t = 10 s and reaches the
-top of the 3 m pole at about t = 132 s:
+The defaults model a **non-sticky pipe, friction 0.5** (rubber-ish on a clean
+pipe; plastic is about 0.3). The robot reaches the pole at about t = 10 s, has
+hold of it by t = 17 s and reaches the top of the 3 m pole at about t = 93 s,
+climbing at 3.7 cm/s. It climbs down to a friction of about 0.25.
 
-```
-stage,      t_start, t_end,  duration, z_start, z_end,  climb,   rate cm/s
-approach,     0.000,   9.917,   9.917,  0.0496, 0.0528, +0.0032,     0.033
-catching,     9.917,  17.796,   7.879,  0.0528, 0.0972, +0.0443,     0.563
-settling,    17.796,  20.797,   3.001,  0.0972, 0.0878, -0.0094,    -0.312
-pitch_ramp,  20.797,  23.797,   3.000,  0.0878, 0.1569, +0.0691,     2.303
-rolling,     23.797, 132.091, 108.294,  0.1569, 2.8002, +2.6434,     2.441
-holding,    132.091, 137.092,   5.001,  2.8002, 2.7923, -0.0079,    -0.158
-```
+The catch is verified, not assumed: the climb only starts once the coil is
+round the pole (see *Catching the pole* below), so a run can no longer set off
+"climbing" a coil that is lying on the floor beside it.
 
 **Start placed on the pole** (`--start_wrapped true`, or the checkbox) drops
 the robot onto the pole already wrapped, as all four of the paper's own
@@ -72,10 +79,10 @@ the one that's live. Either way, whatever value is in force is written to the
 `mu_robot_pole` column of every row of `run.csv` — a run with a moving slider
 is still completely described by its own log.
 
-Measured, held constant for a whole run: mu 1.0 → 0.99 cm/s, 1.5 → 1.95,
-2.0 → 2.40, 3.0 → 3.11. Dragged from 3.0 down to 0.9 mid-climb, the climb
-rate collapses and `mu_required_p95` pins to whatever is available — that is
-the robot sliding.
+The slider runs 0.1–1.5: realistic, non-sticky pipes. Measured, held constant
+for a whole run: mu 0.25 → 1.47 cm/s, 0.3 → 2.27, 0.5 → 3.69, 0.8 → 4.30,
+1.2 → 4.53. Dragged down below about 0.25 mid-climb, the climb stalls and
+`mu_required_p95` pins to whatever is available — that is the robot sliding.
 
 **Rerun** repeats the exact configuration of the last Start — same friction,
 same everything — with one click. It enables after any outcome: a completed
@@ -143,19 +150,19 @@ the plane perpendicular to the estimated axis, eqs. 10–16); orange is the
 cross-section the compliance term just asked for (eq. 23). **The gap between
 the two curves is the grip.**
 
-**The 3-D scene itself carries only what has to be in 3-D:**
+**The 3-D scene itself carries only the height ticks**, every 0.5 m up the
+pole, labelled.
 
-| what you see | what it is |
-| --- | --- |
-| **faint orange body** | a ghost of the commanded form: forward kinematics of the target joint angles on the robot's actual base pose. The gap between ghost and robot is the tracking error the servos are turning into grip force |
-| **height ticks** | every 0.5 m up the pole, labelled |
+**Nothing is drawn on or sticking out of the body.** Contact-force arrows, a
+translucent ghost of the commanded form, and cross-section rings round the
+robot were all tried and all made the wrap harder to read, not easier. The
+contact arrows are still one keypress away (`C`) when they're the question.
+The floor's mirror reflection is off for the same reason — it drew a second,
+see-through snake under the real one.
 
-**Nothing is drawn sticking out of the body.** Contact-force arrows were
-tried and made the wrap harder to read, not easier — a dozen arrows radiating
-off a coiled body hide the coil. They're still one keypress away (`C`) when
-they're the question. The cross-section used to be drawn as two rings
-wrapped around the robot for the same reason it no longer is — it's the 2-D
-plot above instead.
+The plot sits beside the viewer's own FPS / solver readout in the bottom-left
+corner and the slider to its right, all sized from the font, so nothing
+overlaps at any window size.
 
 **A heads-up panel** (top right) carries the same numbers that are going into
 `run.csv` that tick — stage, height, climb rate, coil radius, grip squeeze,
@@ -167,7 +174,7 @@ Keys, on top of the viewer's own:
 | key | |
 | --- | --- |
 | `B` | camera: follow → orbit → free |
-| `N` | annotations: full → plot only → off (also gates the 2-D plot) |
+| `N` | annotations (height ticks and the 2-D plot): on → off |
 | `G` | also toggles the 2-D plot — shared with the base viewer's own "graph" key, which otherwise has nothing left to hide |
 | `Z` | heads-up panel |
 | `SPACE` | pause (`→` steps one frame) |
@@ -181,8 +188,9 @@ it stays live regardless of what `N`/`Z`/`G` are set to.
 
 `9motor_sidewinder_pipe.xml` gained a skybox, three lights instead of one,
 shadow and near-plane settings that suit a tall thin scene, and haze so the
-floor fades into the sky rather than ending on a hard line. All of it is
-inside `<visual>`, `<asset>` and `<light>`.
+floor fades into the sky rather than ending on a hard line. The floor's
+reflectance is 0, so no mirror image. All of it is inside `<visual>`,
+`<asset>` and `<light>`.
 
 **None of it changes the physics**, and that is checked rather than asserted:
 every physics field of the compiled model (masses, inertias, geom sizes,
@@ -203,8 +211,8 @@ experiment. **Every logged row carries the stage it came from**, and
 | stage | what is happening | what to look at |
 | --- | --- | --- |
 | `approach` | sidewinding across the floor to the pole. Open loop, and nothing to do with the paper — its experiments all start with the robot already on the pipe | did it arrive at all (`pairs_wrapped` starts rising) |
-| `catching` | each joint pair ramps from the ground gait into the catching helix as it reaches the pole, so the body closes in the order it arrives | `n_contact_pole` climbing to ~15–20 |
-| `settling` | all nine pairs wrapped, shape held still so contacts settle | height should be roughly flat; a drop means it is sliding |
+| `catching` | the robot straightens against the pole, checks where the pole sits along its body, then curls round it pair by pair outward from the pair nearest it. A miss sends it back to `approach` (or, if the coil is round the pole but crooked, loosens and re-closes it in place) — see *Catching the pole* | the run's messages say which, and why |
+| `settling` | all nine pairs wrapped, shape held still so contacts settle, then the grip is checked before anything climbs | height should be roughly flat; a drop means it is sliding |
 | `pitch_ramp` | the adaptive loop is running and the pitch angle opens from the catching value to the climbing one. Already holding on, already climbing a little | `alpha_rad` ramping, `wrap_turns` settling |
 | `rolling` | the experiment proper: adaptive helical rolling at full pitch angle | **quote climb rates from this stage** |
 | `holding` | top reached, `psi_roll` frozen, robot just gripping | whether height holds or creeps down |
@@ -248,14 +256,14 @@ Sampled at `log_hz` (50 Hz by default). Columns, grouped by what they tell you:
 | `n_contact_self` | – | body-on-body contacts. Should be near zero: if the robot is climbing on these, it is shoving itself up rather than rolling |
 | `n_contact_floor` | – | mostly an approach-stage number |
 | `pole_normal_force_N` | N | total normal force on the pole. Around 50 N for a 0.74 kg (7.2 N) robot — the grip is far heavier than the weight it carries |
-| `mu_required_p95`, `mu_required_max` | – | at each pole contact, tangential force ÷ normal force: the friction coefficient that contact is *demanding*. **Compare with `mu_robot_pole`.** Baseline runs average 1.46 against the 2.0 available, so about a 1.4× margin before it slides |
+| `mu_required_p95`, `mu_required_max` | – | at each pole contact, tangential force ÷ normal force: the friction coefficient that contact is *demanding*. **Compare with `mu_robot_pole`.** Baseline runs average 0.45 against the 0.5 available: the gait runs right at the slip boundary |
 
 **Whether the hardware could do this**
 
 | column | unit | meaning |
 | --- | --- | --- |
 | `joint_torque_rms_Nm`, `joint_torque_max_Nm` | N·m | *delivered* joint torque, after MuJoCo clamps to the model's ±0.8 N·m |
-| `joints_saturated` | – | how many of the 18 joints are asking for more than ±0.8 N·m. Typically 4–6 during the climb — these motors are working at their limit, which is a real constraint and not a simulation artefact |
+| `joints_saturated` | – | how many of the 18 joints are asking for more than ±0.8 N·m. Typically 2–4 during the climb — these motors are working at their limit, which is a real constraint and not a simulation artefact |
 | `mech_power_W` | W | Σ\|torque × velocity\| across the joints |
 
 **Whether the run is trustworthy**
@@ -326,10 +334,18 @@ The panel is grouped the same way `Config` is.
 so sweeps never touch a file. `mass_scale` multiplies mass *and* inertia, so
 it is a clean "heavier robot, same robot" knob.
 
-**Solver and timing** — `timestep`, `control_period`, `max_duration`,
-`target_speedup`, `target_fps`. `control_period` is the controller's rate, and
-0.1 s is the paper's own hardware rate; `target_speedup`/`target_fps` are
-display only and change nothing physical.
+**Solver and timing** — `timestep`, `control_period`, `setpoint_period`,
+`max_duration`, `target_speedup`, `target_fps`. `control_period` is how often
+the controller re-estimates the form from the joints, and 0.1 s is the paper's
+own hardware rate. `setpoint_period` is how often joint targets are streamed
+between those ticks (see *Why it climbs on a slippery pipe*).
+`target_speedup`/`target_fps` are display only and change nothing physical.
+
+**Friction** — `mu_robot_pole` applies to robot–pole contacts and `mu_floor`
+to robot–floor contacts, each on its own. (MuJoCo normally resolves a contact
+pair by taking the larger of the two coefficients, which used to let robot–floor
+contacts silently use the pole's value. The floor and pole now take contact
+priority, so each surface's own number is the one in force.)
 
 **Controller** — `alpha` (pitch angle of the climbing helix), `psi_dot` and
 `spin` (rolling speed and direction), `k_mid`/`k_end` (compliance gain,
@@ -342,86 +358,152 @@ the compliance term only ever asks for "a bit tighter than that". The same
 numbers work on a pole of a different size.
 
 **Start** — either `start_wrapped` with `start_radius` and `start_height`
-(placed on the pole, like the paper), or the catching parameters
-`wrap_alpha`, `wrap_radius`, `wrap_psi`, `alpha_ramp` and `stop_height`.
+(placed on the pole, like the paper), or the catching parameters below.
 Catching is not in the paper, whose experiments all start with the robot
 already on the pipe. A catching shape has different
 requirements from a climbing shape: nearly flat (a steeply pitched helix
 screws off the pole instead of closing around it) and tight. `wrap_psi` sets
-**which plane** the ring closes in and is the single most sensitive number
-here — at 0 the robot closes a ring standing up in a vertical plane and
-misses the pole entirely.
+**which plane** the ring closes in and **on which side of the body** — at 0
+the ring stands up in a vertical plane and misses the pole; at +π/2 it lies
+flat but closes on the side away from the pole; −π/2 (the default) closes it
+round the pole.
+
+### Catching the pole
+
+The original catch curled each pair as it happened to pass near the pole and
+then started climbing regardless. It worked about 60% of the time, and which
+60% depended on millimetres of start position and on the MuJoCo version (the
+same code caught the pole on 3.13 and missed it on 3.14). A miss left a coil
+on the floor that the controller then "climbed" with zero pole contacts.
+
+It now works like this, and caught and climbed in 57 of 60 test runs at pole
+friction 0.3, 0.5 and 0.8, including randomised starts:
+
+1. **Aim.** The start-placement probe aims a point `aim_u` along the body at
+   the pole, not the tail, so the pole arrives mid-catch-window.
+2. **Straighten against the pole** when any pair comes within
+   `prox_threshold`, and come to rest (`straighten_time`, `straighten_hold`).
+   The catch window was mapped from rest; curling straight out of the moving,
+   wavy gait gives a coil tens of degrees off vertical.
+3. **Check the window.** Curl only if the pole is `catch_u_min`–`catch_u_max`
+   along the body from pair 1 and within `catch_v_max` of it; otherwise it is
+   a miss. The body's roll about its own axis is measured and subtracted from
+   `wrap_psi`, so the ring always closes toward the pole.
+4. **Curl as a wave** outward from the pair nearest the pole, one pair every
+   `wrap_wave_delay`, so the body winds round the pole like a rope round a
+   post.
+5. **Verify the grip** at the end of `settling`: at least `min_grip_contacts`
+   pole contacts, the backbone winding at least `min_wrap_turns` round the
+   pole, the COM within `grip_com_radius` of it, and the coil's own axis
+   within `max_catch_tilt` of vertical. Only then does the climb start.
+6. **Retry.** A coil round the pole but crooked is loosened to `reopen_frac`
+   and re-closed in place from the same pair, **with the next catching shape**
+   in `CATCH_ALTERNATES` (pitch, radius, wave spacing). How a coil folds on
+   the floor is repeatable for one shape, so re-closing with the same shape
+   tends to repeat the same crooked coil; each alternate catches starts the
+   others miss. A
+   coil that closed off the pole releases back into the approach gait. A
+   catch that passes the check but peels off in the first moments of the
+   climb (`climb_abort_*`) is re-closed too. After `max_catch_attempts` the
+   run stops and says so — `result.caught_pole` and `result.catch_misses`
+   in `summary.csv` record what happened.
+
+---
+
+## Why it climbs on a slippery pipe
+
+The paper's controller runs at 0.1 s: each tick it re-reads the joints,
+re-estimates the helical form (its steps 1–6) and computes the joint targets
+for the current roll phase `psi_roll` (step 7, eqs. 32–33). The rig used to
+**hold** those targets for the whole tick, so every 0.1 s all 18 setpoints
+jumped by `psi_dot × control_period` = 9° of roll. The servos slammed toward
+each jump, saturated at ±0.8 N·m, and the contacts slipped. With grip pads
+(mu 2.0) that cost half the climb speed; on a real pipe (mu < 1) the robot slid
+down.
+
+The paper's own structure separates the two: estimating the form needs a
+fresh read of the joints, but rolling the body round that form (eq. 33) does
+not. So the form is still estimated every `control_period` (0.1 s, as in the
+paper), while step 7 is re-evaluated with the advancing `psi_roll` every
+`setpoint_period` (0.01 s) and streamed to the servos
+(`HelicalRollingController.retarget`). Streaming goal positions at 100 Hz is
+routine for bus servos. Measured from a pre-wrapped start:
+
+| mu | 0.2 | 0.25 | 0.3 | 0.4 | 0.6 | 0.8 | 1.0 | 2.0 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| setpoints held (old), cm/s | – | – | – | −0.86 | – | −0.02 | 1.02 | 2.43 |
+| setpoints streamed, cm/s | −0.02 | 1.47 | 2.27 | 3.17 | 4.02 | 4.33 | 4.46 | 4.57 |
+
+Below about mu 0.25 it stops climbing whatever the gains: 0.8 N·m servos can
+only squeeze a 0.74 kg robot so hard. Raising K, or rolling faster or slower,
+moves that limit by a few hundredths at most.
 
 ---
 
 ## Measured parameter sensitivity
 
-Nineteen runs, 60 s of simulated time each, **started placed on the pole** so
-that what is being measured is the controller and not the floor gait. One
-parameter changed at a time. `mu needed` and the contact counts are averages
-over the `rolling` stage.
+Twenty-one runs, 60 s of simulated time each, **started placed on the pole**
+so that what is being measured is the controller and not the floor gait.
+Baseline is the defaults (mu 0.5). One parameter changed at a time.
+`mu needed` and the contact counts are averages over the `rolling` stage.
+`python sweep_example.py` reproduces it.
 
 | case | rolling cm/s | climb m | pole contacts | mu needed (p95) | motors saturated |
 | --- | --- | --- | --- | --- | --- |
-| **baseline** | **2.40** | 1.37 | 11.5 | 1.46 | 4.2 |
-| mu 1.0 | 0.99 | 0.57 | 9.6 | 0.78 | 3.9 |
-| mu 1.5 | 1.95 | 1.11 | 10.3 | 1.11 | 4.1 |
-| mu 3.0 | 3.11 | 1.77 | 12.9 | 2.03 | 4.1 |
-| mass x0.5 | 1.47 | 0.84 | 12.7 | 1.33 | 3.5 |
-| mass x2 | 2.89 | 1.65 | 9.8 | 1.48 | 4.6 |
-| mass x4 | **-1.66** | -0.95 | 7.2 | 1.42 | 6.1 |
-| dt 2 ms | 2.61 | 1.49 | 11.3 | 1.45 | 4.2 |
-| dt 0.5 ms | 2.30 | 1.31 | 11.4 | 1.46 | 4.1 |
-| control period 0.2 s | **0.03** | 0.02 | 10.1 | 1.33 | 4.4 |
-| control period 0.02 s | **4.58** | 2.39 | 12.9 | 1.35 | 3.6 |
-| alpha 0.15 | 2.61 | 1.49 | 9.7 | 1.38 | 4.6 |
-| alpha 0.35 | 2.26 | 1.29 | 10.7 | 1.41 | 3.9 |
-| psi_dot x0.5 | 1.85 | 1.05 | 13.1 | 1.21 | 3.4 |
-| psi_dot x2 | **0.27** | 0.15 | 7.9 | 1.58 | 6.0 |
-| K 0.02 | **0.06** | 0.03 | 4.8 | 1.27 | 1.2 |
-| K 0.15 | **-0.56** | -0.32 | 1.6 | 0.22 | 7.8 |
-| pole radius 0.025 | 2.82 | 1.61 | 5.8 | 1.32 | 5.3 |
-| pole radius 0.060 | **-0.44** | -0.25 | 0.9 | 0.19 | 4.9 |
+| **baseline (mu 0.5)** | **3.69** | 2.10 | 11.2 | 0.45 | 2.7 |
+| mu 0.25 | 1.47 | 0.84 | 12.5 | 0.24 | 2.6 |
+| mu 0.3 | 2.27 | 1.29 | 12.2 | 0.28 | 2.7 |
+| mu 0.8 | 4.30 | 2.43 | 10.7 | 0.68 | 2.9 |
+| mu 1.2 | 4.53 | 2.42 | 11.3 | 0.92 | 2.9 |
+| setpoints held (old behaviour) | **−0.41** | −0.24 | 9.7 | 0.43 | 3.8 |
+| mass x0.5 | 2.11 | 1.20 | 11.8 | 0.44 | 2.7 |
+| mass x2 | 4.07 | 2.14 | 10.4 | 0.47 | 2.8 |
+| mass x4 | **−0.09** | −0.05 | 3.6 | 0.31 | 4.8 |
+| dt 2 ms | 3.62 | 2.07 | 11.3 | 0.45 | 2.7 |
+| dt 0.5 ms | 3.71 | 2.11 | 11.2 | 0.45 | 2.8 |
+| control period 0.2 s | 3.56 | 2.03 | 10.8 | 0.45 | 2.6 |
+| control period 0.02 s | 3.86 | 2.20 | 10.7 | 0.45 | 3.1 |
+| alpha 0.15 | **0.22** | 0.12 | 9.2 | 0.45 | 3.8 |
+| alpha 0.35 | 3.38 | 1.92 | 11.8 | 0.45 | 2.6 |
+| psi_dot x0.5 | 1.81 | 1.03 | 12.1 | 0.43 | 2.9 |
+| psi_dot x2 | **6.96** | 2.45 | 10.1 | 0.46 | 2.8 |
+| K 0.02 | **0.09** | 0.05 | 5.5 | 0.45 | 0.0 |
+| K 0.15 | 3.70 | 2.11 | 12.2 | 0.44 | 7.0 |
+| pole radius 0.025 | **−0.02** | −0.01 | 3.5 | 0.38 | 4.2 |
+| pole radius 0.060 | **−0.15** | −0.09 | 6.1 | 0.40 | 3.5 |
 
 What this says:
 
-**Friction sets the climb rate almost linearly** — 0.99, 1.95, 2.40, 3.11 cm/s
-for mu 1.0, 1.5, 2.0, 3.0 — and the friction the gait *demands* tracks it at
-roughly 0.7x whatever is available (0.78, 1.11, 1.46, 2.03). The controller
-does not back off when it has grip to spare; it climbs faster and keeps
-running near the slip boundary. There is no "safe" value of mu that gives a
-big margin, only a faster or slower climb at about the same margin.
+**Streaming the setpoints is the whole difference.** Holding them for the
+tick, as before, slides down at the default friction (−0.41 cm/s).
 
-**The real timing parameter is roll per control tick**, `psi_dot x
-control_period`, not either one alone. The baseline is 9 deg per tick.
-Doubling `psi_dot` and doubling `control_period` both give 18 deg per tick and
-both collapse the climb (0.27 and 0.03 cm/s). Cutting the control period to
-0.02 s gives 1.8 deg per tick and the fastest climb measured, 4.58 cm/s — but
-that is 50 Hz control, five times the rate of the paper's hardware, so it is a
-simulation result rather than something the robot could do.
+**The robot runs at the slip boundary at every friction.** The friction the
+gait demands sits just under whatever is available (0.24 of 0.25, 0.45 of
+0.5, 0.92 of 1.2). It does not keep a margin; spare grip becomes speed.
 
-**The physics timestep barely matters** — 2.30 to 2.61 cm/s across a 4x range
-of `dt`. Worth knowing: the climb is not a numerical artefact.
+**The feedback rate no longer matters much.** With streamed setpoints, 0.2 s,
+0.1 s and 0.02 s feedback give 3.56, 3.69 and 3.86 cm/s. The step-by-step
+roll was the problem, not how often the form is re-estimated, so the paper's
+10 Hz is enough.
 
-**Heavier is better, up to a cliff.** x2 mass climbs *faster* than nominal
-(2.89 vs 2.40), because more weight means more normal force and more traction.
-At x4 it fails outright, with 6 of 18 motors saturated against the +-0.8 N.m
-limit: the grip the robot can generate stops scaling before its weight does.
+**Roll speed is now the throttle.** Doubling `psi_dot` nearly doubles the
+climb (6.96 cm/s); it used to collapse it, because it doubled the jump per
+tick.
 
-**Compliance has a narrow window.** At K = 0.02 the robot barely grips (4.8
-pole contacts against the baseline's 11.5) and hangs there; at K = 0.15 it
-squeezes itself off the pole entirely (1.6 contacts, mu demand 0.22, i.e.
-almost nothing left in contact) and slides down. 0.08 is near the middle.
+**Heavier is fine up to a cliff.** x2 mass climbs faster (4.07), x4 fails with
+the motors saturated: the grip stops scaling before the weight does.
 
-**Pole radius is not a controller parameter, and it shows.** A 2.5 cm pole
-works with the same numbers, at 2.82 cm/s. A 6 cm pole fails — but not because
-the method cannot handle it: at that radius 72 cm of backbone makes only about
-1.05 wraps, and a coil that barely closes once cannot hold. That is a limit of
-this robot's length, not of the control law.
+**Compliance needs a minimum.** K = 0.02 barely grips (5.5 contacts); K = 0.15
+grips but saturates 7 of 18 motors for no gain. 0.08 is near the middle.
 
-**alpha is the gentlest knob here**, 2.26 to 2.61 cm/s over 0.15 to 0.35 rad.
-Which is the expected result: the pitch angle trades wraps against lead, and
-those largely cancel.
+**Pole radius is sensitive at low friction.** At mu 0.5, a 2.5 cm pole gives
+too few contacts to carry the robot, and a 6 cm pole leaves only about one
+wrap of 72 cm of backbone. Both climbed with grip pads; neither does on a
+slippery pipe. That is a limit of this robot's length and torque, not of the
+control law.
+
+**A flat helix does not climb on a slippery pipe.** alpha 0.15 stalls
+(0.22 cm/s); 0.25–0.35 all work.
 
 ---
 
@@ -432,11 +514,13 @@ those largely cancel.
   mirroring the displacement, so friction and mass changes are accounted for.
   It costs about 0.7 s of wall clock per run and is the "measuring the start
   position" message.
-- **`mu_floor` only affects the approach**, but it affects *where the robot
-  ends up*, so it can change whether the pole is caught at all.
-- **A failed catch is not a failed method.** If `pairs_wrapped` reaches 9 but
-  `n_contact_pole` stays near 0, the robot coiled up beside the pole — that is
-  the catching stage, not the controller. Tune `wrap_psi` first.
+- **`mu_floor` only affects the approach and the catch**, but it affects
+  *where the robot ends up*, so it can change whether the pole is caught at
+  all. The catch was tuned at the default 0.9.
+- **A failed catch is not a failed method.** If `result.caught_pole` is
+  False, the robot never got a verified grip — that is the catching stage,
+  not the controller. The run's messages give the reason for every miss
+  (outside the window, too few turns, axis tilted). Check `wrap_psi` first.
 - **Blank cells in `run.csv`** before the loop starts are deliberate: there is
   no estimated axis or coil radius until the controller is running, and a
   placeholder would plot as real data.

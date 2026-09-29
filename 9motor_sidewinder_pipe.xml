@@ -53,7 +53,7 @@
     <texture name="sky" type="skybox" builtin="gradient"
              rgb1="0.35 0.47 0.66" rgb2="0.78 0.84 0.90" width="512" height="512"/>
     <texture name="grid" type="2d" builtin="checker" rgb1="0.1 0.2 0.3" rgb2="0.2 0.3 0.4" width="512" height="512"/>
-    <material name="grid_material" texture="grid" texrepeat="10 10" texuniform="true" reflectance="0.1"/>
+    <material name="grid_material" texture="grid" texrepeat="10 10" texuniform="true" reflectance="0"/>
     <!-- Pipe material: brown, slightly shiny -->
     <material name="pipe_material" rgba="0.55 0.27 0.07 1" reflectance="0.3"/>
     <mesh name="tail" content_type="model/stl" file="tail.STL"/>

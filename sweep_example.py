@@ -21,9 +21,11 @@ from climb_rig import Config, run
 
 CASES = [
     ("baseline",        dict()),
-    ("mu 1.0",          dict(mu_robot_pole=1.0)),
-    ("mu 1.5",          dict(mu_robot_pole=1.5)),
-    ("mu 3.0",          dict(mu_robot_pole=3.0)),
+    ("mu 0.25",         dict(mu_robot_pole=0.25)),
+    ("mu 0.3",          dict(mu_robot_pole=0.3)),
+    ("mu 0.8",          dict(mu_robot_pole=0.8)),
+    ("mu 1.2",          dict(mu_robot_pole=1.2)),
+    ("setpoints held",  dict(setpoint_period=0.1)),
     ("mass x0.5",       dict(mass_scale=0.5)),
     ("mass x2",         dict(mass_scale=2.0)),
     ("mass x4",         dict(mass_scale=4.0)),

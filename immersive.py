@@ -16,15 +16,14 @@ you can actually watch, read, and steer:
     robot/pole sliding friction live while the sim runs. This is the
     authoritative control when this viewer is open -- drag it and watch the
     climb speed up, stall or slip in real time;
-  * a height ruler runs up the pole so progress is legible at a glance;
-  * a faint ghost of the commanded joint targets shows the tracking error the
-    servos are turning into grip force.
+  * a height ruler runs up the pole so progress is legible at a glance.
 
-Deliberately NOT drawn: anything that sticks out of the body. Contact-force
-arrows and a 3-D axis rod were both tried and both made the wrap harder to
-read, not easier -- a dozen arrows radiating off a coiled body hide the coil.
-The contact arrows are still one keypress away (C) when a specific question
-needs them.
+Deliberately NOT drawn: anything on or sticking out of the body. Contact-force
+arrows, a 3-D axis rod and a translucent ghost of the commanded form were all
+tried and all made the wrap harder to read, not easier. The floor's mirror
+reflection is off for the same reason: it put a second, see-through snake
+under the real one. The contact arrows are still one keypress away (C) when a
+specific question needs them.
 
 Everything here is decoration plus the one thing that isn't: dragging the
 slider calls back into the running experiment through `self.mu`, which
@@ -34,7 +33,7 @@ run looks identical with the viewer off.
 Keys added on top of the viewer's own (SPACE pause, C contacts, H menus, ...):
 
     B   camera: follow -> orbit -> free
-    N   annotations: full -> plot only -> off
+    N   annotations (height ruler and cross-section plot): on -> off
     Z   hide/show the heads-up panel
     G   also toggles the cross-section plot (shared with the base viewer's
         own "hide graph" key, which otherwise has nothing left to hide)
@@ -50,60 +49,42 @@ import numpy as np
 import helical_rolling as hr
 
 CAM_MODES = ('follow', 'orbit', 'free')
-ANNOTATION_LEVELS = ('full', 'plot', 'off')
+ANNOTATION_LEVELS = ('on', 'off')
 
-# The friction slider's range. 1.0 is bare plastic on steel, 2.0 assumes soft
-# high-grip elastomer pads, and much above 3 is not a real material pair --
-# it is there so you can see what the gait would do with grip it cannot
-# actually have. Matches experiment_gui.py, which imports these rather than
+# The friction slider's range: real, non-sticky pipes. ~0.2-0.4 is plastic on
+# steel or PVC, ~0.5-0.8 rubber on a clean pipe; above ~1 needs soft
+# high-grip pads. Matches experiment_gui.py, which imports these rather than
 # repeating them, so the two controls can never drift apart.
-MU_MIN, MU_MAX, MU_STEP = 0.5, 4.0, 0.05
+MU_MIN, MU_MAX, MU_STEP = 0.1, 1.5, 0.05
 
-# Colours, kept consistent between the plot and the ghost body.
 C_MEASURED = (0.20, 0.85, 1.00)      # cyan   - what the robot IS
 C_TARGET = (1.00, 0.45, 0.10)        # orange - what it is ASKED for
-C_GHOST = (1.00, 0.45, 0.10, 0.35)   # orange, faint - the target form, in 3-D
 C_RULER = (0.85, 0.85, 0.90, 0.75)
 C_SLIDER_FILL = (0.20, 0.85, 1.00, 0.95)
 C_SLIDER_TRACK = (0.12, 0.13, 0.16, 0.92)
 C_SLIDER_BORDER = (0.04, 0.04, 0.05, 0.95)
 
-# Layout, in pixels. MARGIN is the gap from every screen edge; the block
-# heights stack bottom-up as: hint text, then the track itself, then a header
-# line above it. RIGHT_RESERVE keeps the slider clear of the heads-up panel's
-# legend text in the bottom-right corner.
+# Layout, in pixels. MARGIN is the gap from every screen edge; the slider's
+# block heights stack bottom-up as: hint text, then the track itself, then a
+# header line above it. The bottom-right key panel and the base viewer's
+# bottom-left readout are sized from the font at draw time, so nothing
+# overlaps at any window size or DPI.
 MARGIN = 20
-SLIDER_HINT_H = 18
 SLIDER_TRACK_H = 50
 SLIDER_HEADER_GAP = 8
-RIGHT_RESERVE = 300
 SLIDER_MIN_W = 200
+BOTTOMRIGHT_CHARS = 30           # widest row of the key panel, in characters
 
 PLOT_MIN, PLOT_MAX = 220, 340   # the 2-D panel is square; side length clamps here
 PLOT_FRACTION = 0.24            # ...as this fraction of the shorter screen edge
 PROJ_RANGE = 0.13                # m, fixed half-width so the shape keeps true aspect
 
 
-def _z_to(direction):
-    """Rotation matrix whose z axis points along `direction`."""
-    z = np.asarray(direction, float)
-    n = np.linalg.norm(z)
-    if n < 1e-12:
-        return np.eye(3)
-    z = z / n
-    ref = np.array([1.0, 0.0, 0.0])
-    if abs(z @ ref) > 0.9:
-        ref = np.array([0.0, 1.0, 0.0])
-    x = np.cross(ref, z)
-    x /= np.linalg.norm(x)
-    return np.column_stack([x, np.cross(z, x), z])
-
-
 class ImmersiveViewer(mujoco_viewer.MujocoViewer):
     """MujocoViewer that knows what experiment it is showing, and can steer it."""
 
     def __init__(self, model, data, pole_radius=0.04, pole_height=3.0,
-                 mu=2.0, title="Adaptive helical rolling"):
+                 mu=0.5, title="Adaptive helical rolling"):
         super().__init__(model, data, title=title)
 
         self.pole_radius = float(pole_radius)
@@ -118,14 +99,11 @@ class ImmersiveViewer(mujoco_viewer.MujocoViewer):
         self._plot_rect = None         # (left, bottom, side, side) px, or None if hidden
 
         self.cam_mode = 'follow'
-        self.annotations = 'plot'
+        self.annotations = 'on'
         self.show_hud = True
 
         self._status = {}
         self._info = None
-        self._cmd = None
-        self._backbone = None
-        self._ghost = mujoco.MjData(model)
         self._tracked = None          # smoothed camera target
 
         # A close, slightly low three-quarter view: near enough that the wrap
@@ -143,7 +121,7 @@ class ImmersiveViewer(mujoco_viewer.MujocoViewer):
         self.vopt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = 0
         self.vopt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTFORCE] = 0
         self.scn.flags[mujoco.mjtRndFlag.mjRND_SHADOW] = 1
-        self.scn.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = 1
+        self.scn.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = 0
         self.scn.flags[mujoco.mjtRndFlag.mjRND_SKYBOX] = 1
 
         self._setup_projection_figure()
@@ -154,31 +132,34 @@ class ImmersiveViewer(mujoco_viewer.MujocoViewer):
         fig = mujoco.MjvFigure()
         mujoco.mjv_defaultFigure(fig)
         fig.flg_extend = 0          # fixed range -- see _draw_projection_panel
-        fig.flg_legend = 1
+        # No in-plot legend: it sits on top of the curves. The key is drawn as
+        # coloured text above the panel instead, see _draw_projection_panel.
+        fig.flg_legend = 0
         fig.flg_ticklabel[0] = 1
         fig.flg_ticklabel[1] = 1
         fig.gridsize[:] = (3, 3)
-        fig.title = "Cross-section (Fig. 11): measured vs. commanded"
-        fig.xlabel = "m"
+        fig.xformat = "%.2f"
+        fig.yformat = "%.2f"
+        fig.title = "Cross-section, m"
         fig.figurergba[:] = (0.05, 0.06, 0.08, 0.78)
         fig.panergba[:] = (0.0, 0.0, 0.0, 0.0)
         fig.gridrgb[:] = (0.30, 0.30, 0.33)
         fig.textrgb[:] = (0.85, 0.85, 0.90)
-        fig.legendrgba[:] = (0.05, 0.06, 0.08, 0.55)
         fig.linergb[0][:] = C_MEASURED
         fig.linergb[1][:] = C_TARGET
-        fig.linename[0] = "measured"
-        fig.linename[1] = "commanded"
         self._proj_fig = fig
 
     @staticmethod
     def _set_fig_line(fig, idx, xy):
-        """Write a closed polygon into figure line `idx`, or clear it."""
+        """Write an open curve into figure line `idx`, or clear it.
+
+        Not closed: the cross-section is a spiral of more than one turn, and
+        joining its ends drew a chord straight across the plot.
+        """
         if xy is None or len(xy) == 0:
             fig.linepnt[idx] = 0
             return
         pts = np.asarray(xy, float)
-        pts = np.vstack([pts, pts[0]])           # repeat the first point to close it
         n = min(len(pts), mujoco.mjMAXLINEPNT)
         line = fig.linedata[idx]
         line[0:2 * n:2] = pts[:n, 0]
@@ -241,22 +222,14 @@ class ImmersiveViewer(mujoco_viewer.MujocoViewer):
         super()._cursor_pos_callback(window, xpos, ypos)
 
     # -- what the rig feeds in ---------------------------------------------
-    def update_experiment(self, status, info=None, cmd=None, backbone=None):
+    def update_experiment(self, status, info=None):
         """Hand the viewer the latest experiment state.
 
-        `status` is the rig's progress dict, `info` the controller's own
-        report for this tick, `cmd` the commanded joint angles and `backbone`
-        the node extractor. All optional -- whatever is missing is simply not
-        drawn.
+        `status` is the rig's progress dict and `info` the controller's own
+        report for this tick, or None before the controller is running.
         """
         self._status = status or {}
-        if info is not None:
-            self._info = info
-        if cmd is not None:
-            self._cmd = np.asarray(cmd, float)
-        if backbone is not None:
-            self._backbone = backbone
-
+        self._info = info
         self._track_camera()
 
     def _track_camera(self):
@@ -274,18 +247,8 @@ class ImmersiveViewer(mujoco_viewer.MujocoViewer):
         if self.cam_mode == 'orbit':
             self.cam.azimuth = (self.cam.azimuth + 0.25) % 360.0
 
-    # -- 3-D scene annotation: ghost body + height ruler only now; the
-    #    cross-section rings moved to their own 2-D plot, see below --------
-    def _segment(self, p0, p1, width, rgba, label=""):
-        p0, p1 = np.asarray(p0, float), np.asarray(p1, float)
-        d = p1 - p0
-        length = np.linalg.norm(d)
-        if length < 1e-9:
-            return
-        self.add_marker(type=mujoco.mjtGeom.mjGEOM_CAPSULE,
-                        pos=(p0 + p1) / 2, mat=_z_to(d),
-                        size=(width, width, length / 2), rgba=rgba, label=label)
-
+    # -- 3-D scene annotation: the height ruler is the only thing drawn in
+    #    the scene; the cross-section has its own 2-D plot, see below -------
     def decorate(self):
         """Re-add every marker. Called once per rendered frame.
 
@@ -295,8 +258,6 @@ class ImmersiveViewer(mujoco_viewer.MujocoViewer):
         if self.annotations == 'off':
             return
         self._height_ruler()
-        if self.annotations == 'full':
-            self._ghost_target()
 
     def _height_ruler(self):
         """Marks up the pole every 0.5 m, so progress is readable at a glance."""
@@ -310,33 +271,45 @@ class ImmersiveViewer(mujoco_viewer.MujocoViewer):
                             size=(0.012, 0.002, 0.002),
                             rgba=C_RULER, label=f"{z:.1f} m")
 
-    def _ghost_target(self):
-        """The shape the joints are being commanded into, drawn in place.
-
-        Forward kinematics of the COMMANDED joint angles on the robot's actual
-        base pose: where the body would be if the joints tracked perfectly.
-        The gap between the ghost and the robot is the tracking error that the
-        position servos are converting into grip force.
-        """
-        if self._cmd is None or self._backbone is None:
-            return
-        g = self._ghost
-        mujoco.mj_resetData(self.model, g)
-        g.qpos[0:7] = self.data.qpos[0:7]
-        g.qpos[7:7 + len(self._cmd)] = self._cmd
-        mujoco.mj_forward(self.model, g)
-        pts = self._backbone.nodes(self.model, g)
-        for p0, p1 in zip(pts, pts[1:]):
-            self._segment(p0, p1, 0.006, C_GHOST)
-
     # -- the 2-D cross-section panel, drawn as raw MuJoCo figure ------------
+    # All text in these two panels is drawn with mjr_label into explicit pixel
+    # rects. mjr_text's normalized coordinates are not reliable once
+    # mjr_figure has changed the GL viewport, which is how the key and the
+    # slider's captions used to land on top of the plot and the slider track.
+    def _line_h(self):
+        return int(self.ctx.charHeight) + 6
+
+    def _top_menu_h(self):
+        """Height of the base viewer's top-left menu, from its own line count."""
+        if self._hide_menus:
+            return 0
+        text = self._overlay.get(mujoco.mjtGridPos.mjGRID_TOPLEFT, [""])[0]
+        return int(text.count("\n") * self.ctx.charHeight * 1.18) + MARGIN
+
+    def _char_w(self):
+        return int(self.ctx.charWidth[ord('0')])
+
+    def _label(self, left, bottom, w, h, text, rgb, bg=(0.0, 0.0, 0.0, 0.0)):
+        mujoco.mjr_label(mujoco.MjrRect(int(left), int(bottom), int(w), int(h)),
+                         mujoco.mjtFont.mjFONT_NORMAL, text, *bg, *rgb, self.ctx)
+
+    def _left_reserve(self):
+        """Width taken by the base viewer's bottom-left readout, if shown."""
+        return 0 if self._hide_menus else self._char_w() * 22 + MARGIN
+
     def _draw_projection_panel(self, width, height):
         if self.annotations == 'off' or self._hide_graph:
             self._plot_rect = None
             return
 
+        # Beside the base viewer's bottom-left readout (FPS, solver iterations,
+        # step, timestep), not on top of it, and low enough to stay clear of
+        # the tall top-left menu.
+        lh = self._line_h()
+        left = MARGIN + self._left_reserve()
         side = int(np.clip(min(width, height) * PLOT_FRACTION, PLOT_MIN, PLOT_MAX))
-        self._plot_rect = (MARGIN, MARGIN, side, side)
+        side = max(0, min(side, height - self._top_menu_h() - lh - 2 * MARGIN))
+        self._plot_rect = (left, MARGIN, side, side)
 
         fig = self._proj_fig
         fig.range[0] = [-PROJ_RANGE, PROJ_RANGE]
@@ -347,12 +320,24 @@ class ImmersiveViewer(mujoco_viewer.MujocoViewer):
 
         mujoco.mjr_figure(mujoco.MjrRect(*self._plot_rect), fig, self.ctx)
 
+        # The key: a strip directly above the panel, one word per half.
+        bg = tuple(fig.figurergba)
+        self._label(left, MARGIN + side, side / 2, lh, "measured", C_MEASURED, bg)
+        self._label(left + side / 2, MARGIN + side, side / 2, lh, "commanded", C_TARGET, bg)
+
     # -- the friction slider, drawn and hit-tested in raw pixel space -------
     def _draw_friction_slider(self, width, height):
-        plot_w = self._plot_rect[2] if self._plot_rect else 0
-        left = MARGIN + (plot_w + 48 if self._plot_rect else 0)
-        track_w = max(SLIDER_MIN_W, width - left - RIGHT_RESERVE)
-        bottom = MARGIN + SLIDER_HINT_H
+        # Clear of the plot (or the base viewer's bottom-left readout) on the
+        # left, and of the key panel on the right. Stacked bottom-up: hint
+        # line, track, header line.
+        lh = self._line_h()
+        if self._plot_rect:
+            left = self._plot_rect[0] + self._plot_rect[2] + 2 * MARGIN
+        else:
+            left = MARGIN + self._left_reserve()
+        right_reserve = self._char_w() * BOTTOMRIGHT_CHARS + MARGIN
+        track_w = max(SLIDER_MIN_W, width - left - right_reserve)
+        bottom = MARGIN + lh + 4
         self._slider_track = (left, bottom, track_w, SLIDER_TRACK_H)
 
         border = mujoco.MjrRect(left - 2, bottom - 2, track_w + 4, SLIDER_TRACK_H + 4)
@@ -363,22 +348,18 @@ class ImmersiveViewer(mujoco_viewer.MujocoViewer):
         mujoco.mjr_rectangle(border, *C_SLIDER_BORDER)
         mujoco.mjr_rectangle(track, *C_SLIDER_TRACK)
         mujoco.mjr_rectangle(fill, *C_SLIDER_FILL)
-        mujoco.mjr_label(track, mujoco.mjtFont.mjFONT_BIG,
-                         f"friction (mu)   {self.mu:4.2f}",
-                         0, 0, 0, 0.0, 1, 1, 1, self.ctx)
+        # The normal font: the big one is taller than the track and mjr_label
+        # silently drops text that does not fit its rect.
+        self._label(left, bottom, track_w, SLIDER_TRACK_H,
+                    f"friction (mu)   {self.mu:4.2f}", (1.0, 1.0, 1.0))
 
-        # A hint line below, and a header above -- both in the coordinate
-        # system mjr_text actually uses: normalized [0,1] of the FULL window,
-        # not of the slider rect.
-        mujoco.mjr_text(mujoco.mjtFont.mjFONT_NORMAL,
-                        "drag to change friction while it climbs "
-                        f"({MU_MIN:.1f} bare plastic .. {MU_MAX:.1f} not a real material)",
-                        self.ctx, left / width, MARGIN / height, 0.6, 0.6, 0.65)
-        mujoco.mjr_text(mujoco.mjtFont.mjFONT_NORMAL,
-                        "Friction coefficient, robot <-> pole",
-                        self.ctx, left / width,
-                        (bottom + SLIDER_TRACK_H + SLIDER_HEADER_GAP) / height,
-                        0.85, 0.85, 0.90)
+        hint = (f"drag to change friction while it climbs ({MU_MIN:.1f} .. 0.3 plastic .. "
+                f"0.7 rubber .. {MU_MAX:.1f} grip pads)")
+        if len(hint) * self._char_w() > track_w:
+            hint = "drag to change friction while it climbs"
+        self._label(left, MARGIN, track_w, lh, hint, (0.6, 0.6, 0.65))
+        self._label(left, bottom + SLIDER_TRACK_H + SLIDER_HEADER_GAP, track_w, lh,
+                    "Friction coefficient, robot <-> pole", (0.85, 0.85, 0.90))
 
     # -- heads-up panel ----------------------------------------------------
     def _create_overlay(self):
@@ -426,8 +407,6 @@ class ImmersiveViewer(mujoco_viewer.MujocoViewer):
         put(bottomright, "camera [B]", self.cam_mode)
         put(bottomright, "annotations [N]", self.annotations)
         put(bottomright, "panel [Z]", "on")
-        put(bottomright, "cyan / orange", "measured / commanded cross-section")
-        put(bottomright, "faint body", "the form the joints are commanded into")
 
     # -- render: a full custom pipeline ------------------------------------
     #
