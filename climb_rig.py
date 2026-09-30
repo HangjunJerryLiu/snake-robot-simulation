@@ -204,17 +204,21 @@ def build_model(cfg: Config):
     XML, so a sweep can vary friction or mass without touching a file. The
     robot's geometry, joint layout and actuators are untouched.
     """
-    model = mujoco.MjModel.from_xml_path(MODEL_XML)
+    # Pole radius. Set on the spec BEFORE compiling, not on the compiled model:
+    # the compiler derives the pole's bounding box from its size, and writing
+    # geom_size afterwards leaves that box at the XML's 0.04 m. Collision then
+    # misses much of any larger pole and the robot sinks into it (37.8 mm on
+    # an 0.08 m pole). The half-height and position are left alone, so the
+    # pole still runs from the floor to z = 3.0 m.
+    spec = mujoco.MjSpec.from_file(MODEL_XML)
+    spec.geom('pipe').size[0] = cfg.pole_radius
+    model = spec.compile()
 
     model.opt.timestep = cfg.timestep
     model.opt.gravity[:] = (0.0, 0.0, -abs(cfg.gravity))
 
     floor_gid = model.geom('floor').id
     pipe_gid = model.geom('pipe').id
-
-    # Pole radius. The cylinder's half-height and position are left alone, so
-    # the pole still runs from the floor to z = 3.0 m.
-    model.geom_size[pipe_gid, 0] = cfg.pole_radius
 
     # Sliding friction. MuJoCo combines a contact pair by taking the
     # elementwise maximum, which let robot-floor contacts silently use the

@@ -507,6 +507,43 @@ control law.
 
 ---
 
+## Collision testbench
+
+```
+python test_collisions.py            full, ~5 min
+python test_collisions.py --quick    ~1 min
+```
+
+Run it after any change to the model, `build_model`, or anything that edits
+geometry. Exit code 0 means nothing in the simulation passes through
+anything else. It checks four things, and each check is also run against a
+planted fault it must catch, so a check that cannot fail cannot pass:
+
+| check | what it guarantees | planted fault it must catch |
+| --- | --- | --- |
+| `what_you_see_collides` | every drawn geom also collides | a drawn pole with collision off |
+| `pole_geometry` | the compiled pole's bounding volumes match its radius, at 2–10 cm | the old resize-after-compile build |
+| `joints_do_not_blend` | every joint, swept over its full range, overlaps its neighbour no more than the CAD assembly does straight (real meshes, 0.3 mm voxels) | a link shifted 5 mm along its joint axis, every joint, both ways |
+| `no_penetration_in_motion` | short runs at 2–10 cm, placed and from the floor: no link held more than 3 mm inside the pole, floor or another link for 50 ms, and no momentary spike over 10 mm | the old build on an 8 cm pole (36 mm held) |
+
+Why these are needed: MuJoCo collides links by their convex hulls and never
+collides a link with its own neighbour, and a size written into an
+already-compiled model does not update its collision bounds. Until
+2026-09-29 `build_model` did exactly that to the pole, so every pole larger
+than 4 cm was partly non-colliding (robot links 17 mm inside a 6 cm pole,
+38 mm inside an 8 cm one). Any result from before that date with
+`pole_radius` above 0.04 is invalid — including the "pole radius 0.060" row
+of the sensitivity table above. Against that old code this testbench fails
+two of its four checks.
+
+Touching is not a failure: a tight coil presses links against each other
+and against the pole, as the real robot would. What is checked is parts
+sitting *inside* each other.
+
+`collision_check.py` holds the real-mesh measurement the testbench uses.
+
+---
+
 ## Gotchas
 
 - **The approach is re-measured for every config.** The start position comes
