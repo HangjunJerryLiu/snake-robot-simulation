@@ -12,6 +12,11 @@ floor start alone cannot. Every run leaves its usual folder under
 results/sweep_<stamp>/, and index.csv there has one row per run.
 plot_sweep.py turns that into the figures.
 
+The pitch angle is left at the Config default, which since 2026-09-30 is
+chosen from the pole radius (climb_rig.alpha_for_radius). The sweep of
+2026-09-29 (results/sweep_20260929_002829) predates that and used a fixed
+0.25; pass alpha=0.25 in one() to reproduce it.
+
     python sweep_radius_friction.py                  full grid
     python sweep_radius_friction.py --quick          a few cells, to check it works
 """

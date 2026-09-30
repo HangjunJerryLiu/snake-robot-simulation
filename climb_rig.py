@@ -102,13 +102,23 @@ class Config:
     max_duration: float = 260.0    # s,   hard stop on simulated time
 
     # -- controller (adaptive helical rolling) -----------------------------
-    alpha: float = 0.25            # rad, pitch angle of the climbing helix
+    alpha: float = -1.0            # rad, pitch angle of the climbing helix.
+                                   #      -1 (default) = chosen from the pole
+                                   #      radius by alpha_for_radius(); 0.25 on
+                                   #      the default 4 cm pole. Any value >= 0
+                                   #      is used as given
     k_mid: float = 0.08            # -,   compliance gain, middle joints, eq. (23)
     k_end: float = 0.04            # -,   compliance gain, end joints
     k_end_count: int = 3           # how many joints at each end get k_end
     psi_dot: float = 0.5 * np.pi   # rad/s, rolling speed, eq. (33)
     spin: int = +1                 # +1 climbs, -1 descends
     lead_sign: float = +1.0        # handedness of the wrap
+    freeze_form_at: float = -1.0   # s,   EXPERIMENT SWITCH, off (< 0) by default.
+                                   #      From this sim time on, the joint targets
+                                   #      are held: no re-estimating, no
+                                   #      re-squeezing, no rolling. Used to test
+                                   #      whether the compliance loop itself uses
+                                   #      up friction (see README, "Holding on")
 
     # -- catching the pole (not part of the paper) -------------------------
     wrap_alpha: float = 0.07       # rad, nearly flat so the ring closes on the pole
@@ -419,6 +429,122 @@ def set_friction(model, mu, floor_gid):
             model.geom_friction[g, 0] = mu
 
 
+# ---------------------------------------------------------------------------
+# Operating envelope: can THIS robot do THIS run at all?
+# ---------------------------------------------------------------------------
+# Three limits, all set by the robot's size and strength rather than by the
+# controller, measured in the pole-radius x friction sweep of 2026-09-29
+# (results/sweep_20260929_002829, placed-on-the-pole runs):
+#
+#  * Wrap. The coiled part of the body is its length minus the two end
+#    half-links, foreshortened by the pitch angle, and it winds at the pole
+#    radius plus BACKBONE_OFFSET. Across 3-5.5 cm, where the coil grips,
+#    (sum of links - end links) * cos(alpha) / (2 pi (r + offset)) predicts
+#    the measured wrap to within 0.02-0.09 turns. Measured outcome by
+#    predicted turns: 1.15 (5.5 cm) climbs at mu 0.4-1.0; 1.09 (6 cm) only
+#    at mu 0.4-0.5; 0.98 (7 cm) and below never -- the coil tips over.
+#  * Tightest coil. Links hit each other before the backbone can coil
+#    tighter than MIN_COIL_RADIUS (measured 6.37-6.43 cm on 2-2.5 cm poles),
+#    so below MIN_COIL_RADIUS - BACKBONE_OFFSET (3.0 cm) the coil squeezes
+#    the pole only at a few links. Measured: 2 cm never climbs; 2.5 cm only
+#    at mu >= 1.0 (5 pole contacts); 3 cm at mu >= 0.5; 3.5 cm at mu >= 0.3.
+#    So "outside" starts half a centimetre below that radius, and the band
+#    around it is "marginal".
+#  * Grip. Below mu 0.25 the robot slides down even with rolling switched
+#    off (psi_dot = 0, 4 cm pole), so it is a limit on holding on, not on
+#    climbing; 0.25 climbs, slowly.
+#
+# Measured at alpha 0.25, then re-checked with the pitch rule below
+# (results/pitch_rule_check_20260930_140309): every placed run it calls ok
+# reached the top except 5 cm at mu 0.3 (climbing, 1.4 cm/s); none it calls
+# outside did (7 cm at mu 0.5 climbs, at 1.5 cm/s).
+#
+# These are for the model in 9motor_sidewinder_pipe.xml. Change the robot
+# (link count, thickness, motor torque) and they must be re-measured.
+BACKBONE_OFFSET = 0.034    # m, backbone (link-edge points) to pole surface, gripping
+MIN_COIL_RADIUS = 0.064    # m, tightest backbone coil before links collide
+TURNS_OK = 1.15            # predicted wrap turns: at or above = climbs reliably
+TURNS_MIN = 1.05           # below = cannot hold the pole
+MU_HOLD_MIN = 0.25         # below = slides down even without rolling
+MU_OK = 0.30
+
+
+# ---------------------------------------------------------------------------
+# Pitch angle from the pole radius
+# ---------------------------------------------------------------------------
+# The paper fixes the pitch angle per experiment (0.20-0.30 rad) and calls it
+# a design parameter. Measured here (results/pitch_sweep_20260930_133520:
+# alpha 0.10-0.30 x pole 3-8 cm x mu 0.3/0.5/0.8, placed on the pole), the
+# best pitch falls steadily as the pole gets thicker:
+#
+#     pole   3 cm   only 0.25-0.30 climb; 0.30 fastest (2.70 vs 1.69 cm/s at mu 0.5)
+#            4 cm   0.20-0.30 all reach the top; 0.25 fastest at mu 0.3-0.5
+#            5.5 cm 0.15 fastest at every mu (3.37 vs 2.71 cm/s at mu 0.5)
+#            6 cm   0.10-0.15 reach the top at mu 0.5 AND 0.8; 0.25 falls off at 0.8
+#            6.5 cm only 0.10-0.15 reach the top (mu 0.5); 0.25 falls off
+#            7 cm   0.15 is the only pitch that climbs (1.54 cm/s, mu 0.5)
+#
+# The gain is NOT extra wrap -- cos(0.15)/cos(0.25) is only 2% more turns --
+# and why a flatter helix holds a thick pole better is not established.
+# Below 3 cm and above 5.5 cm the table is held at its end values.
+ALPHA_TABLE = ((0.030, 0.30), (0.040, 0.25), (0.055, 0.15))   # (pole radius m, alpha rad)
+
+
+def alpha_for_radius(pole_radius):
+    """Pitch angle for a pole of this radius: piecewise-linear through
+    ALPHA_TABLE, held at the end values outside it."""
+    r, a = zip(*ALPHA_TABLE)
+    return float(np.interp(pole_radius, r, a))
+
+
+def resolved_alpha(cfg: Config):
+    """The pitch angle a run will actually use."""
+    return cfg.alpha if cfg.alpha >= 0 else alpha_for_radius(cfg.pole_radius)
+
+
+def envelope(cfg: Config, link_lengths):
+    """Where this run sits relative to what the robot can physically do.
+
+    Returns dict(turns, min_pole_radius, level, issues): level is 'ok',
+    'marginal' or 'outside'; issues is a list of plain-language reasons.
+    Nothing is refused -- a run outside the envelope is still a valid
+    experiment -- but its failure is then the robot's size, not the method.
+    """
+    L = np.asarray(link_lengths, float)
+    alpha = resolved_alpha(cfg)
+    wrapped = (L.sum() - L[0] - L[-1]) * np.cos(alpha)
+    turns = wrapped / (2 * np.pi * (cfg.pole_radius + BACKBONE_OFFSET))
+    r_min = MIN_COIL_RADIUS - BACKBONE_OFFSET
+    out, marg = [], []
+
+    if turns < TURNS_MIN:
+        need = TURNS_OK * 2 * np.pi * (cfg.pole_radius + BACKBONE_OFFSET) / np.cos(alpha) \
+            + L[0] + L[-1]
+        out.append(f"the body winds only {turns:.2f} times round a {cfg.pole_radius*100:.1f} cm "
+                   f"pole (needs about {TURNS_OK}); the coil cannot hold and tips off. "
+                   f"About {need:.2f} m of robot would be needed, this one is {L.sum():.2f} m")
+    elif turns < TURNS_OK:
+        marg.append(f"only {turns:.2f} turns of wrap (reliable from {TURNS_OK}); expect it to "
+                    f"fail at some frictions (measured with the pitch rule: 6 cm climbs at "
+                    f"mu 0.5-0.8 but not 0.3; 6.5 cm only at 0.5)")
+    if cfg.pole_radius < r_min - 0.005:
+        out.append(f"the pole is thinner than {(r_min-0.005)*100:.1f} cm: the links collide "
+                   f"before the coil is tight enough to squeeze it")
+    elif cfg.pole_radius < r_min + 0.005:
+        marg.append(f"the pole is near the tightest coil the body can form "
+                    f"({r_min*100:.1f} cm); only a few links grip, so it needs high "
+                    f"friction (measured: 2.5 cm climbs only at mu >= 1.0, 3 cm at >= 0.5)")
+    if cfg.mu_robot_pole < MU_HOLD_MIN:
+        out.append(f"friction {cfg.mu_robot_pole:.2f} is below {MU_HOLD_MIN}: the robot slides "
+                   f"down even without rolling")
+    elif cfg.mu_robot_pole < MU_OK:
+        marg.append(f"friction {cfg.mu_robot_pole:.2f} is near the {MU_HOLD_MIN} holding limit; "
+                    f"expect a slow climb")
+
+    level = 'outside' if out else ('marginal' if marg else 'ok')
+    return dict(turns=float(turns), min_pole_radius=float(r_min), level=level, issues=out + marg)
+
+
 def run(cfg: Config, on_progress=None, should_stop=None, on_message=None,
         live_mu=None):
     """Run one experiment. Returns a summary dict; writes CSVs as it goes.
@@ -438,12 +564,24 @@ def run(cfg: Config, on_progress=None, should_stop=None, on_message=None,
     """
     say = on_message or (lambda s: None)
 
+    # Resolve the pitch angle once, here, so everything below -- the placed
+    # helix, the pitch ramp, config.json and summary.csv -- sees the value
+    # actually used. config.json therefore re-runs identically.
+    alpha_source = 'fixed' if cfg.alpha >= 0 else 'from pole radius'
+    cfg = dataclasses.replace(cfg, alpha=resolved_alpha(cfg))
+
     run_dir = _make_run_dir(cfg)
     say(f"writing to {run_dir}")
+    say(f"pitch angle {cfg.alpha:.3f} rad ({alpha_source})")
 
     model = build_model(cfg)
     data = mujoco.MjData(model)
     backbone = Backbone(model)
+    env = envelope(cfg, backbone.link_lengths)
+    if env['level'] != 'ok':
+        say(f"ENVELOPE {env['level'].upper()}: predicted wrap {env['turns']:.2f} turns")
+        for why in env['issues']:
+            say(f"   - {why}")
     dt = model.opt.timestep
     pipe_gid = model.geom('pipe').id
     floor_gid = model.geom('floor').id
@@ -738,7 +876,9 @@ def run(cfg: Config, on_progress=None, should_stop=None, on_message=None,
                         say(f"t={t:6.2f}s  reached the top "
                             f"({data.subtree_com[0, 2]:.2f} m); holding on")
 
-                if (t - last_control) >= cfg.control_period:
+                if 0 <= cfg.freeze_form_at <= t:
+                    pass            # experiment switch: hold the last targets
+                elif (t - last_control) >= cfg.control_period:
                     last_control = last_setpoint = t
                     cmd, info = controller.target(backbone.nodes(model, data), psi_roll)
                     cmd = np.clip(cmd, jnt_lo, jnt_hi)
@@ -954,6 +1094,11 @@ def run(cfg: Config, on_progress=None, should_stop=None, on_message=None,
         orbit_rev=round(orbit / (2 * np.pi), 3),
         diverged=diverged,
         stopped_early=stopped_early,
+        alpha_used=round(cfg.alpha, 4),
+        alpha_source=alpha_source,
+        envelope=env['level'],
+        envelope_turns=round(env['turns'], 3),
+        envelope_issues=' | '.join(env['issues']),
     )
     with open(os.path.join(run_dir, 'summary.csv'), 'w', newline='') as f:
         w = csv.writer(f)

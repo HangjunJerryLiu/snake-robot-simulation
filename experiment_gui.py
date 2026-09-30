@@ -57,7 +57,7 @@ GROUPS = [
         ('target_fps', 'Viewer frame rate', 'fps', ''),
     ]),
     ("Controller (helical rolling)", [
-        ('alpha', 'Pitch angle alpha', 'rad', '0.20 - 0.30 in the paper'),
+        ('alpha', 'Pitch angle alpha', 'rad', '-1 = from pole radius; paper 0.20-0.30'),
         ('psi_dot', 'Roll rate psi_dot', 'rad/s', 'the only term that climbs'),
         ('spin', 'Spin direction', '+1/-1', '+1 climbs with lead +1'),
         ('k_mid', 'Compliance K, middle', '-', 'squeeze per tick, eq. (23)'),
@@ -329,7 +329,25 @@ class App:
         except ValueError as exc:
             messagebox.showerror("Check the parameters", str(exc))
             return
+        if not self._envelope_ok(cfg):
+            return
         self._launch(cfg)
+
+    def _envelope_ok(self, cfg):
+        """Warn, before anything runs, when the pole or friction is outside
+        what this robot can physically do (climb_rig.envelope). The run is
+        still allowed -- it is a valid experiment -- but its failure would be
+        the robot's size or grip, not the controller."""
+        from snake_backbone import Backbone
+        env = climb_rig.envelope(cfg, Backbone(climb_rig.build_model(cfg)).link_lengths)
+        if env['level'] == 'ok':
+            return True
+        reasons = "\n\n".join(f"- {why}" for why in env['issues'])
+        title = ("Outside what this robot can do" if env['level'] == 'outside'
+                 else "At the edge of what this robot can do")
+        return messagebox.askokcancel(
+            title, f"Predicted wrap: {env['turns']:.2f} turns.\n\n{reasons}\n\n"
+                   "Run it anyway?", icon='warning')
 
     def rerun(self):
         # Re-run the exact configuration of the last Start, unmodified. This

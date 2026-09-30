@@ -347,7 +347,9 @@ pair by taking the larger of the two coefficients, which used to let robot–flo
 contacts silently use the pole's value. The floor and pole now take contact
 priority, so each surface's own number is the one in force.)
 
-**Controller** — `alpha` (pitch angle of the climbing helix), `psi_dot` and
+**Controller** — `alpha` (pitch angle of the climbing helix; −1, the
+default, chooses it from the pole radius — see *Pitch angle from the pole
+radius*), `psi_dot` and
 `spin` (rolling speed and direction), `k_mid`/`k_end` (compliance gain,
 eq. 23), `lead_sign` (handedness). `spin` and `lead_sign` must match: `+1/+1`
 and `−1/−1` climb, the mixed pairs slide off.
@@ -470,7 +472,12 @@ Baseline is the defaults (mu 0.5). One parameter changed at a time.
 | K 0.02 | **0.09** | 0.05 | 5.5 | 0.45 | 0.0 |
 | K 0.15 | 3.70 | 2.11 | 12.2 | 0.44 | 7.0 |
 | pole radius 0.025 | **−0.02** | −0.01 | 3.5 | 0.38 | 4.2 |
-| pole radius 0.060 | **−0.15** | −0.09 | 6.1 | 0.40 | 3.5 |
+| ~~pole radius 0.060~~ | ~~−0.15~~ | ~~−0.09~~ | ~~6.1~~ | ~~0.40~~ | ~~3.5~~ |
+
+The struck-out row was simulated against a partly non-colliding pole (see
+*Collision testbench*) and is invalid. Re-run with the fix, a 6 cm pole at
+mu 0.5 climbs at **2.08 cm/s** and reaches the top. The 2.5 cm row is
+unaffected by that bug and stands.
 
 What this says:
 
@@ -496,14 +503,120 @@ the motors saturated: the grip stops scaling before the weight does.
 **Compliance needs a minimum.** K = 0.02 barely grips (5.5 contacts); K = 0.15
 grips but saturates 7 of 18 motors for no gain. 0.08 is near the middle.
 
-**Pole radius is sensitive at low friction.** At mu 0.5, a 2.5 cm pole gives
-too few contacts to carry the robot, and a 6 cm pole leaves only about one
-wrap of 72 cm of backbone. Both climbed with grip pads; neither does on a
-slippery pipe. That is a limit of this robot's length and torque, not of the
-control law.
+**Pole radius has hard limits on both sides, and both are the robot's
+size.** At mu 0.5 a 2.5 cm pole gives too few contacts to carry the robot:
+the links collide before the coil is tight enough. A 6 cm pole climbs, but
+only between mu 0.4 and 0.5; from 7 cm the body winds barely once round the
+pole and the coil tips off. See *Operating envelope* below. (An earlier
+version of this paragraph said 6 cm does not climb; that came from the
+pole-collision bug.)
 
 **A flat helix does not climb on a slippery pipe.** alpha 0.15 stalls
 (0.22 cm/s); 0.25–0.35 all work.
+
+---
+
+## Operating envelope
+
+Some runs cannot succeed whatever the controller does, because the pole or
+the friction is outside what this robot can physically do. Every run now
+checks for that before it starts (`climb_rig.envelope`), prints the reason
+in the run log, and writes `result.envelope` (`ok` / `marginal` /
+`outside`), `result.envelope_turns` and `result.envelope_issues` to
+`summary.csv`. The GUI asks before starting a run that is not `ok`. Nothing
+is refused: a run outside the envelope is still a valid experiment, it just
+fails for a reason that is not the method.
+
+| limit | rule | measured |
+| --- | --- | --- |
+| wrap | predicted turns = (body length − end half-links) × cos α ÷ 2π(r + 3.4 cm); ok ≥ 1.15, outside < 1.05 | 5.5 cm (1.15) climbs at mu 0.4–1.0; 6 cm (1.09) only at 0.4–0.5; 7 cm (0.98) and above never. The formula matches the measured wrap within 0.02–0.09 turns wherever the coil grips |
+| tightest coil | links collide before the backbone coils tighter than 6.4 cm radius, i.e. poles under ~3.0 cm; outside < 2.5 cm, marginal 2.5–3.5 cm | 2 cm never climbs; 2.5 cm only at mu ≥ 1.0; 3 cm at ≥ 0.5 |
+| grip | outside mu < 0.25, marginal < 0.30 | below 0.25 the robot slides down even with rolling switched off |
+
+Scored against all 195 placed-on-the-pole runs of the radius × friction
+sweep: of runs it calls `ok`, 65 of 70 reach the top; of runs it calls
+`outside`, 2 of 96 do (2.5 cm at mu 1.2 and 1.5). The five `ok` runs that
+do not: 5 cm at mu 0.3 and 5.5 cm at mu 0.30–0.35 climb 2.0–2.2 m but not
+to the top in 150 s, and 5.5 cm at mu 1.2–1.5 slide off. The last is the
+same unexplained high-friction failure seen at 6 cm (coil tilt grows with
+friction there); it is not modelled by the envelope.
+
+For comparison, the robot in Takemori et al. (28 joints, 89.5 mm links,
+a 300 mm tail link, 115 mm thick with its sponge rubber) is about 2.8 m
+long and was only ever run on 150–250 mm pipes. Estimated the same way,
+with the paper's own 55 mm link radius in place of this robot's offset,
+that is roughly 2.4–3.3 turns. The paper states no size or friction limit and never gets
+near one. This robot has 1.38 turns on its default 4 cm pole.
+
+The constants (`BACKBONE_OFFSET`, `MIN_COIL_RADIUS`, the turn and friction
+thresholds) were measured for this model. A different robot needs them
+measured again.
+
+## Holding on at low friction
+
+Below mu 0.25 the robot does not fail to climb — it fails to hold on: with
+rolling switched off it still slides down. That is odd at first sight: the
+grip is ~78 N on a 7.2 N robot, so carrying the weight needs only ~0.09,
+yet the contacts demand all 0.20 that is available.
+
+One suspect was the compliance loop itself: re-squeezing every 0.1 s could
+drag the links sideways along the pole and spend the friction the weight
+needs. `python study_hold.py` tests that with the `freeze_form_at` switch,
+which holds the joint targets from a given time. **It is not the cause.**
+At mu 0.20 (the one friction where the robot slides without reaching the
+floor inside the window) frozen slides 69 mm in 28 s against 76 mm
+adaptive. Re-squeezing does double the friction the contacts demand at
+mu 0.5 (0.36 vs 0.18), but that is not what lets the robot slide. Even
+frozen, the contacts demand ~0.18, about twice what the weight needs, so
+roughly half the tangential load is internal to the grip. Where it comes
+from is still open. `freeze_form_at` is off by default and exists only for
+this study.
+
+## Pitch angle from the pole radius
+
+The paper treats the pitch angle α as a design parameter and fixes it per
+experiment (0.20–0.30). Measured here, the best α falls steadily as the
+pole gets thicker, so **`alpha` now defaults to −1, meaning "choose it from
+the pole radius"** (`climb_rig.alpha_for_radius`). Any value ≥ 0 — from the
+panel, `--alpha 0.30`, or `Config(alpha=...)` — is used exactly as given, as
+before. The value used is printed at the start of every run and written to
+`config.alpha`, `result.alpha_used` and `result.alpha_source`; `config.json`
+holds the resolved value, so it re-runs identically.
+
+The rule is piecewise-linear through three points and held flat outside
+them: 3 cm → 0.30, 4 cm → 0.25, 5.5 cm and above → 0.15. On the default 4 cm
+pole it gives 0.25, so default runs are unchanged (checked: identical to
+the digit).
+
+It comes from `python sweep_pitch_radius.py` (α 0.10–0.30 × pole 3–8 cm ×
+mu 0.3/0.5/0.8, placed on the pole, 120 runs, all passing the penetration
+check; figure in `results/pitch_sweep_*/figures/`). At a fixed 0.25, 6 cm at
+mu 0.8 and 6.5 cm at mu 0.5 slide off; at 0.15 both reach the top.
+
+`python validate_pitch_rule.py` then ran the rule against fixed 0.25 at
+3.5–7 cm, placed and from the floor (84 runs, all valid):
+
+| | better | same | worse |
+| --- | --- | --- | --- |
+| placed on the pole | 9 | 12 | 0 |
+| from the floor | 8 | 13 | 0 |
+
+Read this honestly: **3.5, 4.2 and 4.5 cm were held out of the fit, and
+there the rule is safe but gains little** (+0.0 to +0.2 cm/s). The large
+gains are at 5–7 cm, which the rule was fitted on — though the from-the-floor
+runs there are new (the sweep was placed-only) and show the same gains:
+5 cm at mu 0.5 goes from stuck (0.01 cm/s) to the top, 6 cm at mu 0.8 from
+sliding off to the top, 6.5 cm at mu 0.5 likewise.
+
+What it does not do: it does not create more wrap (cos 0.15 / cos 0.25 is
+only 2% more turns), so it does not move the size limits much — 7 cm still
+does not reach the top, and 8 cm does not climb at any pitch. Why a flatter
+helix holds a thick pole better is not established. A prediction that the
+limit is where successive turns start to sit on each other was tested and
+failed: α 0.10 climbs well below that line on 5–6.5 cm poles.
+
+Sweeps made before this change (`results/sweep_20260929_002829`) used a
+fixed 0.25; re-running `sweep_radius_friction.py` now uses the rule.
 
 ---
 
